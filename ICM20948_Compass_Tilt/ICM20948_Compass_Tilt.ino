@@ -382,15 +382,14 @@ void calibrateMagnetometer() {
         
         float rangeX = magMax[0] - magMin[0];
         float rangeY = magMax[1] - magMin[1];
-        float rangeZ = magMax[2] - magMin[2];
         
-        // Check if all axes have sufficient range AND minimum time has passed
+        // Check if X and Y axes have sufficient range AND minimum time has passed
+        // Z axis is not required for compass heading accuracy
         unsigned long elapsedTime = millis() - startTime;
         bool minTimePassed = elapsedTime >= CALIBRATION_MIN_TIME;
         
         if (rangeX >= CALIBRATION_MIN_RANGE && 
             rangeY >= CALIBRATION_MIN_RANGE && 
-            rangeZ >= CALIBRATION_MIN_RANGE &&
             minTimePassed) {
           calibrationComplete = true;
         }
@@ -402,13 +401,11 @@ void calibrateMagnetometer() {
           display.println(F("CAL OK!"));
         } else {
           display.print(F("CAL: "));
-          // Show which axes need more data (only when range is insufficient)
+          // Show which axes need more data (only X and Y are required)
           bool xNeedsData = rangeX < CALIBRATION_MIN_RANGE;
           bool yNeedsData = rangeY < CALIBRATION_MIN_RANGE;
-          bool zNeedsData = rangeZ < CALIBRATION_MIN_RANGE;
           if (xNeedsData) display.print(F("X"));
           if (yNeedsData) display.print(F("Y"));
-          if (zNeedsData) display.print(F("Z"));
           // Show remaining time if waiting for minimum time
           if (!minTimePassed) {
             unsigned long remainingTime = (CALIBRATION_MIN_TIME - elapsedTime) / 1000;
@@ -423,9 +420,7 @@ void calibrateMagnetometer() {
         display.print(F(" Y:"));
         display.print((int)rangeY);
         display.setCursor(0, 22);
-        display.print(F("Z:"));
-        display.print((int)rangeZ);
-        display.print(F(" min:"));
+        display.print(F("min:"));
         display.print((int)CALIBRATION_MIN_RANGE);
         display.display();
       }
@@ -478,18 +473,13 @@ void updateDisplay() {
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   
-  // Use filtered yaw value based on filtered heading
-  float yawFiltered = headingMagFiltered;
-  
   // Jeden ekran - wszystkie dane kompaktowo
-  // Linia 1: X (Roll), Y (Pitch), Z (Yaw) - using filtered values
+  // Linia 1: X (Roll), Y (Pitch) - using filtered values
   display.setCursor(0, 0);
   display.print(F("X:"));
-  display.print(rollFiltered, 0);
+  display.print(rollFiltered, 1);
   display.print(F(" Y:"));
-  display.print(pitchFiltered, 0);
-  display.print(F(" Z:"));
-  display.print(yawFiltered, 0);
+  display.print(pitchFiltered, 1);
   
   // Calculate deviations from North using filtered values
   float magDeviation = getDeviationFromNorth(headingMagFiltered);

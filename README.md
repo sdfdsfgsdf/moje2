@@ -10,13 +10,13 @@ Projekt na Arduino Mini Pro do pomiaru pochylenia i wskazywania północy magnet
 
 ## Funkcje / Features
 
-- ✅ Pomiar pochylenia na 3 osiach (X, Y, Z / Roll, Pitch, Yaw)
+- ✅ Pomiar pochylenia na 2 osiach (X, Y / Roll, Pitch) z dokładnością 1 miejsca po przecinku
 - ✅ Wskazanie północy magnetycznej
 - ✅ Wskazanie północy geograficznej (skorygowane dla Żywca, Polska)
 - ✅ Filtrowanie EMA (Exponential Moving Average) dla stabilnych odczytów
 - ✅ Poprawne uśrednianie kątowe dla kompasu (obsługa przejścia 0°/360°)
 - ✅ Jeden ekran OLED ze wszystkimi danymi
-- ✅ Automatyczna kalibracja magnetometru (wykrywanie krótkich uruchomień)
+- ✅ Automatyczna kalibracja magnetometru dla osi X i Y (wykrywanie krótkich uruchomień)
 - ✅ Zapisywanie danych kalibracji w EEPROM
 
 ## Dane lokalizacyjne / Location Data
@@ -111,8 +111,8 @@ Kalibracja magnetometru uruchamia się automatycznie poprzez krótkie uruchomien
 6. **Zrestartuj** urządzenie
 
 ### Podczas kalibracji:
-- Na ekranie wyświetlane są osie wymagające kalibracji (X, Y, Z) oraz aktualne zakresy
-- Kalibracja trwa minimum 10 sekund i zakończy się automatycznie gdy wszystkie osie osiągną minimalny zakres (100 uT)
+- Na ekranie wyświetlane są osie wymagające kalibracji (X, Y) oraz aktualne zakresy
+- Kalibracja trwa minimum 10 sekund i zakończy się automatycznie gdy osie X i Y osiągną minimalny zakres (100 uT)
 - Maksymalny czas kalibracji to 60 sekund
 - Dane kalibracji są automatycznie zapisywane w EEPROM
 
@@ -123,11 +123,11 @@ Kalibracja magnetometru uruchamia się automatycznie poprzez krótkie uruchomien
 
 Jeden ekran ze wszystkimi danymi:
 ```
-X:0 Y:0 Z:0
+X:0.0 Y:0.0
 Mag:-5.0° N
 Geo:0.0° N
 ```
-- **X, Y, Z** - kąty pochylenia (Roll, Pitch, Yaw)
+- **X, Y** - kąty pochylenia (Roll, Pitch) z dokładnością do 1 miejsca po przecinku
 - **Mag** - odchylenie od bieguna magnetycznego (0 = idealnie na północ, wartości ujemne = na zachód, dodatnie = na wschód)
 - **Geo** - odchylenie od bieguna geograficznego (skorygowane o deklinację, 0 = idealnie na północ)
 
