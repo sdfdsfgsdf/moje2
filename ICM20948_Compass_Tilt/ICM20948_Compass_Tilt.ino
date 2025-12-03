@@ -116,7 +116,8 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
-#include <ICM_20948.h>
+#include <math.h>
+#include "ICM_20948.h"
 
 // ============================================
 // CONFIGURATION
@@ -179,7 +180,6 @@ float magScaleZ = 1.0;
 // Display mode (0: Tilt, 1: Compass, 2: All data)
 int displayMode = 0;
 unsigned long lastDisplayUpdate = 0;
-unsigned long lastButtonCheck = 0;
 
 // Button state variables / Zmienne stanu przycisku
 bool buttonState = HIGH;           // Aktualny stan przycisku (HIGH = nie naciśnięty)
@@ -225,8 +225,6 @@ void setup() {
   display.display();
   
   // Initialize ICM-20948
-  bool initialized = false;
-  
   // Try default address first
   imu.begin(Wire, 1); // AD0 = 1 -> address 0x69
   
@@ -473,11 +471,25 @@ void calibrateMagnetometer() {
   magOffsetZ = (magMax[2] + magMin[2]) / 2.0;
   
   // Calculate soft iron scale factors
-  float avgDelta = ((magMax[0] - magMin[0]) + (magMax[1] - magMin[1]) + (magMax[2] - magMin[2])) / 3.0;
+  // If axis delta is too small (sensor wasn't rotated properly on that axis),
+  // use default scale of 1.0 to avoid division by zero or unstable results.
+  // MIN_DELTA is a small value to handle floating-point precision issues.
+  const float MIN_DELTA = 1.0;  // Minimum delta value (1.0 uT)
   
-  magScaleX = avgDelta / (magMax[0] - magMin[0]);
-  magScaleY = avgDelta / (magMax[1] - magMin[1]);
-  magScaleZ = avgDelta / (magMax[2] - magMin[2]);
+  float deltaX = magMax[0] - magMin[0];
+  float deltaY = magMax[1] - magMin[1];
+  float deltaZ = magMax[2] - magMin[2];
+  
+  // Use fabs() for reliable floating-point comparison and ensure positive deltas
+  if (fabs(deltaX) < MIN_DELTA) deltaX = MIN_DELTA;
+  if (fabs(deltaY) < MIN_DELTA) deltaY = MIN_DELTA;
+  if (fabs(deltaZ) < MIN_DELTA) deltaZ = MIN_DELTA;
+  
+  float avgDelta = (deltaX + deltaY + deltaZ) / 3.0;
+  
+  magScaleX = avgDelta / deltaX;
+  magScaleY = avgDelta / deltaY;
+  magScaleZ = avgDelta / deltaZ;
   
   // Print calibration results
   Serial.println(F("Calibration complete!"));
