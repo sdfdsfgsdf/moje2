@@ -382,7 +382,6 @@ void calibrateMagnetometer() {
         
         float rangeX = magMax[0] - magMin[0];
         float rangeY = magMax[1] - magMin[1];
-        float rangeZ = magMax[2] - magMin[2];
         
         // Check if X and Y axes have sufficient range AND minimum time has passed
         // Z axis is not required for compass heading accuracy
