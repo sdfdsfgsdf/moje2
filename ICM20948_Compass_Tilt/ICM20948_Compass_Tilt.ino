@@ -37,7 +37,6 @@
 
 // Display update interval (ms) - uśrednianie co 250ms
 #define DISPLAY_UPDATE_INTERVAL 250
-#define AVERAGING_SAMPLES 5  // Ilość próbek do uśredniania
 
 // Calibration settings
 #define CALIBRATION_SAMPLES 100
@@ -63,7 +62,7 @@ float headingTrue = 0;  // True heading (degrees)
 // Averaging buffers / Bufory uśredniania
 float rollSum = 0, pitchSum = 0, yawSum = 0;
 float headingMagSum = 0, headingTrueSum = 0;
-int avgCount = 0;
+uint8_t avgCount = 0;  // uint8_t max 255 - wystarczy dla 250ms
 
 // Magnetometer calibration offsets (hard iron)
 float magOffsetX = 0;
