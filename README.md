@@ -111,7 +111,7 @@ Kalibracja magnetometru uruchamia się automatycznie poprzez krótkie uruchomien
 
 ### Podczas kalibracji:
 - Na ekranie wyświetlane są osie wymagające kalibracji (X, Y, Z) oraz aktualne zakresy
-- Kalibracja zakończy się automatycznie gdy wszystkie osie osiągną minimalny zakres (100 uT)
+- Kalibracja trwa minimum 10 sekund i zakończy się automatycznie gdy wszystkie osie osiągną minimalny zakres (100 uT)
 - Maksymalny czas kalibracji to 60 sekund
 - Dane kalibracji są automatycznie zapisywane w EEPROM
 
