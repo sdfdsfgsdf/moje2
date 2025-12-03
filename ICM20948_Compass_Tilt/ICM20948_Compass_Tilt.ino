@@ -308,14 +308,14 @@ void calculateTilt() {
 
 void calculateHeading() {
   // Get raw magnetometer data and apply axis mapping
-  // ICM-20948's magnetometer (AK09916) has different axis orientation than accelerometer/gyro:
-  // - AK09916 X axis corresponds to ICM-20948 Y axis
-  // - AK09916 Y axis corresponds to ICM-20948 X axis (inverted)
-  // - AK09916 Z axis corresponds to ICM-20948 Z axis (inverted)
-  // We need to transform magnetometer readings to match accelerometer coordinate system
-  float magRawX = imu.magY();   // Mag X corresponds to Accel Y
-  float magRawY = -imu.magX();  // Mag Y corresponds to -Accel X (inverted)
-  float magRawZ = -imu.magZ();  // Mag Z corresponds to -Accel Z (inverted)
+  // ICM-20948's magnetometer (AK09916) has different axis orientation than accelerometer/gyro.
+  // The following transformation aligns magnetometer readings with the accelerometer coordinate system:
+  // - New X = raw magY (swap X and Y)
+  // - New Y = -raw magX (swap and invert)
+  // - New Z = -raw magZ (invert)
+  float magRawX = imu.magY();   // New X from raw Y
+  float magRawY = -imu.magX();  // New Y from -raw X
+  float magRawZ = -imu.magZ();  // New Z from -raw Z
   
   // Apply hard iron calibration (offsets)
   float mx = magRawX - magOffsetX;
@@ -389,10 +389,11 @@ void calibrateMagnetometer() {
       imu.getAGMT();
       
       // Apply same axis mapping as in calculateHeading()
-      // Transform magnetometer to accelerometer coordinate system
-      float mx = imu.magY();    // Mag X corresponds to Accel Y
-      float my = -imu.magX();   // Mag Y corresponds to -Accel X (inverted)
-      float mz = -imu.magZ();   // Mag Z corresponds to -Accel Z (inverted)
+      // Transform magnetometer to accelerometer coordinate system:
+      // - New X = raw magY, New Y = -raw magX, New Z = -raw magZ
+      float mx = imu.magY();    // New X from raw Y
+      float my = -imu.magX();   // New Y from -raw X
+      float mz = -imu.magZ();   // New Z from -raw Z
       
       if (mx < magMin[0]) magMin[0] = mx;
       if (mx > magMax[0]) magMax[0] = mx;
