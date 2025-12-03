@@ -13,7 +13,8 @@ Projekt na Arduino Mini Pro do pomiaru pochylenia i wskazywania północy magnet
 - ✅ Pomiar pochylenia na 3 osiach (X, Y, Z / Roll, Pitch, Yaw)
 - ✅ Wskazanie północy magnetycznej
 - ✅ Wskazanie północy geograficznej (skorygowane dla Żywca, Polska)
-- ✅ Uśrednianie wyników co 0.25s dla większej dokładności
+- ✅ Filtrowanie EMA (Exponential Moving Average) dla stabilnych odczytów
+- ✅ Poprawne uśrednianie kątowe dla kompasu (obsługa przejścia 0°/360°)
 - ✅ Jeden ekran OLED ze wszystkimi danymi
 - ✅ Automatyczna kalibracja magnetometru (wykrywanie krótkich uruchomień)
 - ✅ Zapisywanie danych kalibracji w EEPROM
