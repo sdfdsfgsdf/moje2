@@ -163,6 +163,8 @@ void setup() {
     }
   }
   
+  delay(100);  // Czas na stabilizację ICM-20948 po inicjalizacji
+  
   // Configure IMU
   configureIMU();
   
@@ -278,7 +280,33 @@ void configureIMU() {
   imu.enableDLPF(ICM_20948_Internal_Acc, true);
   imu.enableDLPF(ICM_20948_Internal_Gyr, true);
   
-  imu.startupMagnetometer();
+  // Inicjalizacja magnetometru z opóźnieniem i ponownymi próbami
+  bool magInitSuccess = false;
+  for (int attempt = 0; attempt < 5; attempt++) {
+    imu.startupMagnetometer();
+    delay(100);  // Czas na stabilizację AK09916
+    
+    // Sprawdź czy magnetometr odpowiada - wykonaj testowy odczyt
+    if (imu.dataReady()) {
+      imu.getAGMT();
+      // Jeśli magnetometr zwraca jakiekolwiek niezerowe dane, uznaj za sukces
+      if (imu.magX() != 0 || imu.magY() != 0 || imu.magZ() != 0) {
+        magInitSuccess = true;
+        break;
+      }
+    }
+    delay(50);  // Dodatkowe opóźnienie przed ponowną próbą
+  }
+  
+  // Jeśli inicjalizacja nie powiodła się, wyświetl ostrzeżenie na OLED
+  if (!magInitSuccess) {
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println(F("Mag init warning"));
+    display.println(F("Check sensor"));
+    display.display();
+    delay(2000);
+  }
 }
 
 // ============================================
