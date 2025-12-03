@@ -116,7 +116,7 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
-#include <ICM_20948.h>
+#include "ICM_20948.h"
 
 // ============================================
 // CONFIGURATION
@@ -179,7 +179,6 @@ float magScaleZ = 1.0;
 // Display mode (0: Tilt, 1: Compass, 2: All data)
 int displayMode = 0;
 unsigned long lastDisplayUpdate = 0;
-unsigned long lastButtonCheck = 0;
 
 // Button state variables / Zmienne stanu przycisku
 bool buttonState = HIGH;           // Aktualny stan przycisku (HIGH = nie naciśnięty)
@@ -225,8 +224,6 @@ void setup() {
   display.display();
   
   // Initialize ICM-20948
-  bool initialized = false;
-  
   // Try default address first
   imu.begin(Wire, 1); // AD0 = 1 -> address 0x69
   
@@ -473,11 +470,20 @@ void calibrateMagnetometer() {
   magOffsetZ = (magMax[2] + magMin[2]) / 2.0;
   
   // Calculate soft iron scale factors
-  float avgDelta = ((magMax[0] - magMin[0]) + (magMax[1] - magMin[1]) + (magMax[2] - magMin[2])) / 3.0;
+  // Protect against division by zero
+  float deltaX = magMax[0] - magMin[0];
+  float deltaY = magMax[1] - magMin[1];
+  float deltaZ = magMax[2] - magMin[2];
   
-  magScaleX = avgDelta / (magMax[0] - magMin[0]);
-  magScaleY = avgDelta / (magMax[1] - magMin[1]);
-  magScaleZ = avgDelta / (magMax[2] - magMin[2]);
+  if (deltaX == 0) deltaX = 1.0;
+  if (deltaY == 0) deltaY = 1.0;
+  if (deltaZ == 0) deltaZ = 1.0;
+  
+  float avgDelta = (deltaX + deltaY + deltaZ) / 3.0;
+  
+  magScaleX = avgDelta / deltaX;
+  magScaleY = avgDelta / deltaY;
+  magScaleZ = avgDelta / deltaZ;
   
   // Print calibration results
   Serial.println(F("Calibration complete!"));
