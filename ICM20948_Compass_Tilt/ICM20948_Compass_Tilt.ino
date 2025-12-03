@@ -275,7 +275,7 @@ void calibrateMagnetometer() {
   display.clearDisplay();
   display.setCursor(0, 0);
   display.println(F("CALIBRATION"));
-  display.println(F("Rotate sensor"));
+  display.println(F("Rotate all axes"));
   display.display();
   
   float magMin[3] = {32767, 32767, 32767};
@@ -466,7 +466,7 @@ void checkButton() {
         
         display.clearDisplay();
         display.setCursor(0, 10);
-        display.println(F("Hold 3s=cal"));
+        display.println(F("Hold 3s for cal"));
         display.display();
       }
       else {
