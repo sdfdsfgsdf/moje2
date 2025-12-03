@@ -116,6 +116,7 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <math.h>
 #include "ICM_20948.h"
 
 // ============================================
@@ -479,10 +480,10 @@ void calibrateMagnetometer() {
   float deltaY = magMax[1] - magMin[1];
   float deltaZ = magMax[2] - magMin[2];
   
-  // Use abs() for reliable floating-point comparison and ensure positive deltas
-  if (abs(deltaX) < MIN_DELTA) deltaX = MIN_DELTA;
-  if (abs(deltaY) < MIN_DELTA) deltaY = MIN_DELTA;
-  if (abs(deltaZ) < MIN_DELTA) deltaZ = MIN_DELTA;
+  // Use fabs() for reliable floating-point comparison and ensure positive deltas
+  if (fabs(deltaX) < MIN_DELTA) deltaX = MIN_DELTA;
+  if (fabs(deltaY) < MIN_DELTA) deltaY = MIN_DELTA;
+  if (fabs(deltaZ) < MIN_DELTA) deltaZ = MIN_DELTA;
   
   float avgDelta = (deltaX + deltaY + deltaZ) / 3.0;
   
