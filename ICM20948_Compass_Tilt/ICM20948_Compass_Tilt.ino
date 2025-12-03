@@ -67,6 +67,14 @@
 #define CALIBRATION_CHECK_INTERVAL 500  // Check calibration quality every 500ms
 
 // ============================================
+// FUNCTION PROTOTYPES
+// ============================================
+
+// EMA filter functions
+float applyEMAFilter(float newValue, float oldFiltered, float alpha);
+float applyEMAFilterAngle(float newAngle, float oldFiltered, float alpha);
+
+// ============================================
 // GLOBAL OBJECTS
 // ============================================
 
@@ -562,10 +570,8 @@ float applyEMAFilterAngle(float newAngle, float oldFiltered, float alpha) {
   // Convert back to angle
   float filteredAngle = atan2(filteredY, filteredX) * 180.0 / PI;
   
-  // Normalize to 0-360 degrees
-  if (filteredAngle < 0) {
-    filteredAngle += 360.0;
-  }
+  // Normalize to 0-360 degrees using fmod for robust handling
+  filteredAngle = fmod(filteredAngle + 360.0, 360.0);
   
   return filteredAngle;
 }
