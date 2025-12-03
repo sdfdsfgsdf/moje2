@@ -36,8 +36,8 @@ Projekt na Arduino Mini Pro do pomiaru pochylenia i wskazywania północy magnet
 │  [VCC] ─── Zasilanie regulowane 3.3/5V │
 │  [GND] ─── Masa                         │
 │                                         │
-│  [A4/SDA] ─── I2C Data                 │
-│  [A5/SCL] ─── I2C Clock                │
+│  [4/SDA] ─── I2C Data                  │
+│  [5/SCL] ─── I2C Clock                 │
 │                                         │
 │  [D2] ─── Przycisk kalibracji          │
 └─────────────────────────────────────────┘
@@ -49,8 +49,8 @@ Projekt na Arduino Mini Pro do pomiaru pochylenia i wskazywania północy magnet
 ┌─────────────────────────────────────────┐
 │  VCC ────── Arduino VCC (3.3V!)        │
 │  GND ────── Arduino GND                │
-│  SDA ────── Arduino A4                 │
-│  SCL ────── Arduino A5                 │
+│  SDA ────── Arduino 4                  │
+│  SCL ────── Arduino 5                  │
 │  AD0 ────── GND (adres 0x68)           │
 │         lub VCC (adres 0x69)           │
 │  INT ────── (opcjonalnie) Arduino D3   │
@@ -65,8 +65,8 @@ Projekt na Arduino Mini Pro do pomiaru pochylenia i wskazywania północy magnet
 ┌─────────────────────────────────────────┐
 │  VCC ────── Arduino VCC (3.3V lub 5V)  │
 │  GND ────── Arduino GND                │
-│  SDA ────── Arduino A4                 │
-│  SCL ────── Arduino A5                 │
+│  SDA ────── Arduino 4                  │
+│  SCL ────── Arduino 5                  │
 └─────────────────────────────────────────┘
 ```
 
@@ -97,12 +97,12 @@ Projekt na Arduino Mini Pro do pomiaru pochylenia i wskazywania północy magnet
           └───────────┴───────────┴──── GND
 
      ICM-20948                Arduino Mini
-       [SDA] ─────────────────── [A4]
-       [SCL] ─────────────────── [A5]
+       [SDA] ─────────────────── [4]
+       [SCL] ─────────────────── [5]
 
      OLED 128x32              Arduino Mini
-       [SDA] ─────────────────── [A4]
-       [SCL] ─────────────────── [A5]
+       [SDA] ─────────────────── [4]
+       [SCL] ─────────────────── [5]
 
      Przycisk                 Arduino Mini
        [Pin1] ────────────────── [D2]
