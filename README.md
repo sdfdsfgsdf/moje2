@@ -11,11 +11,12 @@ Projekt na Arduino Mini Pro do pomiaru pochylenia i wskazywania północy magnet
 
 ## Funkcje / Features
 
-- ✅ Pomiar pochylenia na 3 osiach (Roll, Pitch, Yaw)
+- ✅ Pomiar pochylenia na 3 osiach (X, Y, Z / Roll, Pitch, Yaw)
 - ✅ Wskazanie północy magnetycznej
 - ✅ Wskazanie północy geograficznej (skorygowane dla Żywca, Polska)
+- ✅ Uśrednianie wyników co 0.25s dla większej dokładności
+- ✅ Jeden ekran OLED ze wszystkimi danymi
 - ✅ Kalibracja magnetometru (przycisk lub serial)
-- ✅ 3 tryby wyświetlania
 
 ## Dane lokalizacyjne / Location Data
 
@@ -115,14 +116,19 @@ Projekt na Arduino Mini Pro do pomiaru pochylenia i wskazywania północy magnet
 
 | Akcja | Funkcja |
 |-------|---------|
-| Krótkie naciśnięcie | Zmiana trybu wyświetlania |
 | Przytrzymanie 3 sek | Uruchomienie kalibracji magnetometru |
 
-## Tryby wyświetlania
+## Wyświetlanie
 
-1. **Tryb pochylenia (Tilt)** - Roll, Pitch + mały kompas
-2. **Tryb kompasu (Compass)** - Północ magnetyczna i geograficzna
-3. **Tryb wszystkich danych (All)** - Kompaktowy widok wszystkich wartości
+Jeden ekran ze wszystkimi danymi:
+```
+X:0 Y:0 Z:0
+Mag:45° NE
+Geo:50° NE
+```
+- **X, Y, Z** - kąty pochylenia (Roll, Pitch, Yaw)
+- **Mag** - biegun magnetyczny
+- **Geo** - biegun geograficzny (skorygowany o deklinację)
 
 ## Wymagane biblioteki
 

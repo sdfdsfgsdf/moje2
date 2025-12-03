@@ -35,8 +35,9 @@
 // Source: NOAA World Magnetic Model
 #define MAGNETIC_DECLINATION 5.5
 
-// Display update interval (ms)
-#define DISPLAY_UPDATE_INTERVAL 100
+// Display update interval (ms) - uśrednianie co 250ms
+#define DISPLAY_UPDATE_INTERVAL 250
+#define AVERAGING_SAMPLES 5  // Ilość próbek do uśredniania
 
 // Calibration settings
 #define CALIBRATION_SAMPLES 100
@@ -59,6 +60,11 @@ float yaw = 0;     // Rotation around Z axis (degrees)
 float headingMag = 0;   // Magnetic heading (degrees)
 float headingTrue = 0;  // True heading (degrees)
 
+// Averaging buffers / Bufory uśredniania
+float rollSum = 0, pitchSum = 0, yawSum = 0;
+float headingMagSum = 0, headingTrueSum = 0;
+int avgCount = 0;
+
 // Magnetometer calibration offsets (hard iron)
 float magOffsetX = 0;
 float magOffsetY = 0;
@@ -69,8 +75,7 @@ float magScaleX = 1.0;
 float magScaleY = 1.0;
 float magScaleZ = 1.0;
 
-// Display mode (0: Tilt, 1: Compass, 2: All data)
-int displayMode = 0;
+// Display mode (tylko 1 tryb teraz - wszystkie dane)
 unsigned long lastDisplayUpdate = 0;
 
 // Button state variables / Zmienne stanu przycisku
@@ -142,7 +147,7 @@ void setup() {
 // ============================================
 
 void loop() {
-  // Check for button press (calibration and mode change)
+  // Check for button press (calibration)
   checkButton();
   
   // Read sensor data
@@ -154,11 +159,34 @@ void loop() {
     
     // Calculate compass heading from magnetometer
     calculateHeading();
+    
+    // Accumulate for averaging / Zbieraj do uśredniania
+    rollSum += roll;
+    pitchSum += pitch;
+    yawSum += yaw;
+    headingMagSum += headingMag;
+    headingTrueSum += headingTrue;
+    avgCount++;
   }
   
-  // Update display at fixed interval
+  // Update display at fixed interval (co 250ms)
   if (millis() - lastDisplayUpdate >= DISPLAY_UPDATE_INTERVAL) {
     lastDisplayUpdate = millis();
+    
+    // Calculate averages / Oblicz średnie
+    if (avgCount > 0) {
+      roll = rollSum / avgCount;
+      pitch = pitchSum / avgCount;
+      yaw = yawSum / avgCount;
+      headingMag = headingMagSum / avgCount;
+      headingTrue = headingTrueSum / avgCount;
+      
+      // Reset accumulators / Resetuj akumulatory
+      rollSum = pitchSum = yawSum = 0;
+      headingMagSum = headingTrueSum = 0;
+      avgCount = 0;
+    }
+    
     updateDisplay();
   }
 }
@@ -346,87 +374,31 @@ void updateDisplay() {
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   
-  switch (displayMode) {
-    case 0:
-      displayTiltMode();
-      break;
-    case 1:
-      displayCompassMode();
-      break;
-    case 2:
-      displayAllDataMode();
-      break;
-  }
-  
-  display.display();
-}
-
-void displayTiltMode() {
-  // Title
+  // Jeden ekran - wszystkie dane kompaktowo
+  // Linia 1: X (Roll), Y (Pitch), Z (Yaw)
   display.setCursor(0, 0);
-  display.println(F("TILT (degrees)"));
-  
-  // Roll
-  display.setCursor(0, 10);
-  display.print(F("Roll:  "));
-  display.print(roll, 1);
-  display.print((char)247); // Degree symbol
-  
-  // Pitch
-  display.setCursor(0, 20);
-  display.print(F("Pitch: "));
-  display.print(pitch, 1);
-  display.print((char)247);
-  
-  // Small compass indicator on right side
-  display.setCursor(90, 10);
-  display.print(F("N:"));
-  display.print((int)headingTrue);
-}
-
-void displayCompassMode() {
-  // Title with location
-  display.setCursor(0, 0);
-  display.println(F("COMPASS - Zywiec,PL"));
-  
-  // Magnetic heading
-  display.setCursor(0, 10);
-  display.print(F("Mag:  "));
-  display.print(headingMag, 1);
-  display.print((char)247);
-  display.print(F(" "));
-  display.print(getCardinalDirection(headingMag));
-  
-  // True heading
-  display.setCursor(0, 20);
-  display.print(F("True: "));
-  display.print(headingTrue, 1);
-  display.print((char)247);
-  display.print(F(" "));
-  display.print(getCardinalDirection(headingTrue));
-}
-
-void displayAllDataMode() {
-  // Compact display with all data
-  display.setCursor(0, 0);
-  display.print(F("R:"));
+  display.print(F("X:"));
   display.print(roll, 0);
-  display.print(F(" P:"));
-  display.print(pitch, 0);
   display.print(F(" Y:"));
+  display.print(pitch, 0);
+  display.print(F(" Z:"));
   display.print(yaw, 0);
   
-  display.setCursor(0, 10);
-  display.print(F("Mag N: "));
-  display.print(headingMag, 1);
+  // Linia 2: Biegun magnetyczny
+  display.setCursor(0, 11);
+  display.print(F("Mag:"));
+  display.print(headingMag, 0);
   display.print((char)247);
+  display.print(getCardinalDirection(headingMag));
   
-  display.setCursor(0, 20);
-  display.print(F("True N:"));
-  display.print(headingTrue, 1);
+  // Linia 3: Biegun geograficzny
+  display.setCursor(0, 22);
+  display.print(F("Geo:"));
+  display.print(headingTrue, 0);
   display.print((char)247);
-  display.print(F(" "));
   display.print(getCardinalDirection(headingTrue));
+  
+  display.display();
 }
 
 // ============================================
@@ -463,37 +435,11 @@ void checkButton() {
       if (buttonState == LOW) {
         buttonPressTime = millis();
         longPressTriggered = false;
-        
-        display.clearDisplay();
-        display.setCursor(0, 10);
-        display.println(F("Hold 3s for cal"));
-        display.display();
-      }
-      else {
-        unsigned long pressDuration = millis() - buttonPressTime;
-        
-        if (!longPressTriggered && pressDuration < LONG_PRESS_TIME) {
-          displayMode = (displayMode + 1) % 3;
-        }
       }
     }
     
     if (buttonState == LOW && !longPressTriggered) {
       unsigned long pressDuration = millis() - buttonPressTime;
-      
-      if (pressDuration > 500) {
-        int secondsRemaining = (LONG_PRESS_TIME - pressDuration) / 1000 + 1;
-        if (secondsRemaining > 0 && secondsRemaining <= 3) {
-          display.clearDisplay();
-          display.setCursor(0, 0);
-          display.println(F("CAL IN:"));
-          display.setTextSize(2);
-          display.setCursor(50, 15);
-          display.print(secondsRemaining);
-          display.setTextSize(1);
-          display.display();
-        }
-      }
       
       if (pressDuration >= LONG_PRESS_TIME) {
         longPressTriggered = true;
