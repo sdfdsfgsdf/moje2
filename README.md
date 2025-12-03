@@ -7,7 +7,6 @@ Projekt na Arduino Mini Pro do pomiaru pochylenia i wskazywania północy magnet
 - **Arduino Mini Pro** (3.3V lub 5V)
 - **ICM-20948** - 9-DOF IMU (akcelerometr, żyroskop, magnetometr)
 - **OLED 128x32** - wyświetlacz I2C (sterownik SSD1306)
-- **Przycisk** - do kalibracji i zmiany trybu
 
 ## Funkcje / Features
 
@@ -16,7 +15,8 @@ Projekt na Arduino Mini Pro do pomiaru pochylenia i wskazywania północy magnet
 - ✅ Wskazanie północy geograficznej (skorygowane dla Żywca, Polska)
 - ✅ Uśrednianie wyników co 0.25s dla większej dokładności
 - ✅ Jeden ekran OLED ze wszystkimi danymi
-- ✅ Kalibracja magnetometru (przycisk lub serial)
+- ✅ Automatyczna kalibracja magnetometru (wykrywanie krótkich uruchomień)
+- ✅ Zapisywanie danych kalibracji w EEPROM
 
 ## Dane lokalizacyjne / Location Data
 
@@ -39,8 +39,6 @@ Projekt na Arduino Mini Pro do pomiaru pochylenia i wskazywania północy magnet
 │                                         │
 │  [A4/SDA] ─── I2C Data                 │
 │  [A5/SCL] ─── I2C Clock                │
-│                                         │
-│  [D2] ─── Przycisk kalibracji          │
 └─────────────────────────────────────────┘
 ```
 
@@ -71,19 +69,6 @@ Projekt na Arduino Mini Pro do pomiaru pochylenia i wskazywania północy magnet
 └─────────────────────────────────────────┘
 ```
 
-### Przycisk kalibracji
-
-```
-┌─────────────────────────────────────────┐
-│  Arduino D2 ───┬─── Przycisk ─── GND   │
-│                │                        │
-│                └─── (wewnętrzny pullup) │
-│                                         │
-│  Przytrzymaj 3 sekundy = kalibracja    │
-│  Krótkie naciśnięcie = zmiana trybu    │
-└─────────────────────────────────────────┘
-```
-
 ## Schemat połączeń
 
 ```
@@ -104,19 +89,34 @@ Projekt na Arduino Mini Pro do pomiaru pochylenia i wskazywania północy magnet
      OLED 128x32              Arduino Mini
        [SDA] ─────────────────── [A4]
        [SCL] ─────────────────── [A5]
-
-     Przycisk                 Arduino Mini
-       [Pin1] ────────────────── [D2]
-       [Pin2] ────────────────── [GND]
 ```
 
-## Sterowanie
+## Automatyczna kalibracja
 
-### Przycisk (D2)
+Kalibracja magnetometru uruchamia się automatycznie poprzez krótkie uruchomienia urządzenia:
 
-| Akcja | Funkcja |
-|-------|---------|
-| Przytrzymanie 3 sek | Uruchomienie kalibracji magnetometru |
+| Uruchomienie | Czas działania | Efekt |
+|--------------|----------------|-------|
+| 1 | < 2 sekundy | Licznik +1 |
+| 2 | < 2 sekundy | Licznik +1 |
+| 3 | - | **Tryb kalibracji** |
+
+### Jak uruchomić kalibrację:
+1. **Uruchom** urządzenie i **wyłącz** przed upływem 2 sekund
+2. **Powtórz** krok 1
+3. Przy **trzecim uruchomieniu** automatycznie włączy się tryb kalibracji
+4. Obracaj czujnik we wszystkich kierunkach
+5. Po zakończeniu kalibracji wyświetli się komunikat "Please restart."
+6. **Zrestartuj** urządzenie
+
+### Podczas kalibracji:
+- Na ekranie wyświetlane są osie wymagające kalibracji (X, Y, Z) oraz aktualne zakresy
+- Kalibracja zakończy się automatycznie gdy wszystkie osie osiągną minimalny zakres (100 uT)
+- Maksymalny czas kalibracji to 60 sekund
+- Dane kalibracji są automatycznie zapisywane w EEPROM
+
+### Reset licznika:
+- Jeśli urządzenie działa **dłużej niż 2 sekundy**, licznik krótkich uruchomień jest resetowany
 
 ## Wyświetlanie
 
@@ -137,16 +137,6 @@ Zainstaluj przez Arduino Library Manager:
 1. **Adafruit SSD1306** - obsługa wyświetlacza OLED
 2. **Adafruit GFX** - grafika dla wyświetlaczy
 3. **SparkFun ICM-20948** - obsługa czujnika IMU
-
-## Kalibracja magnetometru
-
-Dla uzyskania dokładnych odczytów kompasu, przeprowadź kalibrację:
-
-1. Przytrzymaj przycisk przez 3 sekundy (lub wyślij `c` przez serial)
-2. Obracaj czujnik we wszystkich kierunkach
-3. Na ekranie wyświetlane są osie wymagające kalibracji (X, Y, Z) oraz aktualne zakresy
-4. Kalibracja zakończy się automatycznie gdy wszystkie osie osiągną minimalny zakres (100 uT)
-5. Maksymalny czas kalibracji to 60 sekund - jeśli nie uda się zebrać wystarczających danych, wyświetli się komunikat "Cal Timeout"
 
 ## Instalacja
 
