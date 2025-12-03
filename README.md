@@ -123,12 +123,12 @@ Projekt na Arduino Mini Pro do pomiaru pochylenia i wskazywania północy magnet
 Jeden ekran ze wszystkimi danymi:
 ```
 X:0 Y:0 Z:0
-Mag:45° NE
-Geo:50° NE
+Mag:-5.0° N
+Geo:0.0° N
 ```
 - **X, Y, Z** - kąty pochylenia (Roll, Pitch, Yaw)
-- **Mag** - biegun magnetyczny
-- **Geo** - biegun geograficzny (skorygowany o deklinację)
+- **Mag** - odchylenie od bieguna magnetycznego (0 = idealnie na północ, wartości ujemne = na zachód, dodatnie = na wschód)
+- **Geo** - odchylenie od bieguna geograficznego (skorygowane o deklinację, 0 = idealnie na północ)
 
 ## Wymagane biblioteki
 
@@ -143,8 +143,10 @@ Zainstaluj przez Arduino Library Manager:
 Dla uzyskania dokładnych odczytów kompasu, przeprowadź kalibrację:
 
 1. Przytrzymaj przycisk przez 3 sekundy (lub wyślij `c` przez serial)
-2. Obracaj czujnik we wszystkich kierunkach przez 30 sekund
-3. Kalibracja zakończy się automatycznie
+2. Obracaj czujnik we wszystkich kierunkach
+3. Na ekranie wyświetlane są osie wymagające kalibracji (X, Y, Z) oraz aktualne zakresy
+4. Kalibracja zakończy się automatycznie gdy wszystkie osie osiągną minimalny zakres (100 uT)
+5. Maksymalny czas kalibracji to 60 sekund - jeśli nie uda się zebrać wystarczających danych, wyświetli się komunikat "Cal Timeout"
 
 ## Instalacja
 

@@ -40,6 +40,9 @@
 
 // Calibration settings
 #define CALIBRATION_SAMPLES 100
+#define CALIBRATION_MAX_TIME 60000      // Maximum calibration time (60 seconds)
+#define CALIBRATION_MIN_RANGE 100.0     // Minimum range required for each axis (uT)
+#define CALIBRATION_CHECK_INTERVAL 500  // Check calibration quality every 500ms
 
 // ============================================
 // GLOBAL OBJECTS
@@ -309,9 +312,10 @@ void calibrateMagnetometer() {
   float magMax[3] = {-32767, -32767, -32767};
   
   unsigned long startTime = millis();
-  unsigned long duration = 30000;
+  unsigned long lastCheckTime = startTime;
+  bool calibrationComplete = false;
   
-  while (millis() - startTime < duration) {
+  while (!calibrationComplete && (millis() - startTime < CALIBRATION_MAX_TIME)) {
     if (imu.dataReady()) {
       imu.getAGMT();
       
@@ -326,15 +330,47 @@ void calibrateMagnetometer() {
       if (mz < magMin[2]) magMin[2] = mz;
       if (mz > magMax[2]) magMax[2] = mz;
       
-      int progress = (millis() - startTime) * 100 / duration;
-      display.clearDisplay();
-      display.setCursor(0, 0);
-      display.print(F("CAL "));
-      display.print(progress);
-      display.println(F("%"));
-      display.display();
+      // Check calibration quality periodically
+      if (millis() - lastCheckTime >= CALIBRATION_CHECK_INTERVAL) {
+        lastCheckTime = millis();
+        
+        float rangeX = magMax[0] - magMin[0];
+        float rangeY = magMax[1] - magMin[1];
+        float rangeZ = magMax[2] - magMin[2];
+        
+        // Check if all axes have sufficient range
+        if (rangeX >= CALIBRATION_MIN_RANGE && 
+            rangeY >= CALIBRATION_MIN_RANGE && 
+            rangeZ >= CALIBRATION_MIN_RANGE) {
+          calibrationComplete = true;
+        }
+        
+        // Update display with progress
+        display.clearDisplay();
+        display.setCursor(0, 0);
+        if (calibrationComplete) {
+          display.println(F("CAL OK!"));
+        } else {
+          display.print(F("CAL: "));
+          // Show which axes need more data
+          if (rangeX < CALIBRATION_MIN_RANGE) display.print(F("X"));
+          if (rangeY < CALIBRATION_MIN_RANGE) display.print(F("Y"));
+          if (rangeZ < CALIBRATION_MIN_RANGE) display.print(F("Z"));
+        }
+        display.setCursor(0, 11);
+        display.print(F("X:"));
+        display.print((int)rangeX);
+        display.print(F(" Y:"));
+        display.print((int)rangeY);
+        display.setCursor(0, 22);
+        display.print(F("Z:"));
+        display.print((int)rangeZ);
+        display.print(F(" min:"));
+        display.print((int)CALIBRATION_MIN_RANGE);
+        display.display();
+      }
     }
-    delay(50);
+    delay(10);
   }
   
   magOffsetX = (magMax[0] + magMin[0]) / 2.0;
@@ -359,7 +395,12 @@ void calibrateMagnetometer() {
   
   display.clearDisplay();
   display.setCursor(0, 0);
-  display.println(F("Cal Done!"));
+  if (calibrationComplete) {
+    display.println(F("Cal Done!"));
+  } else {
+    display.println(F("Cal Timeout"));
+    display.println(F("Try again"));
+  }
   display.display();
   delay(2000);
 }
@@ -383,17 +424,21 @@ void updateDisplay() {
   display.print(F(" Z:"));
   display.print(yaw, 0);
   
-  // Linia 2: Biegun magnetyczny
+  // Calculate deviations from North
+  float magDeviation = getDeviationFromNorth(headingMag);
+  float geoDeviation = getDeviationFromNorth(headingTrue);
+  
+  // Linia 2: Biegun magnetyczny - odchylenie od północy
   display.setCursor(0, 11);
   display.print(F("Mag:"));
-  display.print(headingMag, 0);
+  display.print(magDeviation, 1);
   display.print((char)247);
   display.print(getCardinalDirection(headingMag));
   
-  // Linia 3: Biegun geograficzny
+  // Linia 3: Biegun geograficzny - odchylenie od północy
   display.setCursor(0, 22);
   display.print(F("Geo:"));
-  display.print(headingTrue, 0);
+  display.print(geoDeviation, 1);
   display.print((char)247);
   display.print(getCardinalDirection(headingTrue));
   
@@ -414,6 +459,18 @@ const char* getCardinalDirection(float heading) {
   if (heading >= 247.5 && heading < 292.5) return "W";
   if (heading >= 292.5 && heading < 337.5) return "NW";
   return "?";
+}
+
+// Calculate deviation from North (ideal direction = 0°)
+// Returns value from -180 to +180 degrees
+// Positive = east of North, Negative = west of North
+float getDeviationFromNorth(float heading) {
+  float deviation = heading;
+  if (deviation > 180) {
+    deviation = deviation - 360;
+  }
+  // Handle exactly 180° as +180° (due South, maximum deviation)
+  return deviation;
 }
 
 // ============================================
