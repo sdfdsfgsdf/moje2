@@ -55,6 +55,7 @@
 
 // Calibration settings
 #define CALIBRATION_SAMPLES 100
+#define CALIBRATION_MIN_TIME 10000      // Minimum calibration time (10 seconds)
 #define CALIBRATION_MAX_TIME 60000      // Maximum calibration time (60 seconds)
 #define CALIBRATION_MIN_RANGE 100.0     // Minimum range required for each axis (uT)
 #define CALIBRATION_CHECK_INTERVAL 500  // Check calibration quality every 500ms
@@ -371,10 +372,14 @@ void calibrateMagnetometer() {
         float rangeY = magMax[1] - magMin[1];
         float rangeZ = magMax[2] - magMin[2];
         
-        // Check if all axes have sufficient range
+        // Check if all axes have sufficient range AND minimum time has passed
+        unsigned long elapsedTime = millis() - startTime;
+        bool minTimePassed = elapsedTime >= CALIBRATION_MIN_TIME;
+        
         if (rangeX >= CALIBRATION_MIN_RANGE && 
             rangeY >= CALIBRATION_MIN_RANGE && 
-            rangeZ >= CALIBRATION_MIN_RANGE) {
+            rangeZ >= CALIBRATION_MIN_RANGE &&
+            minTimePassed) {
           calibrationComplete = true;
         }
         
@@ -385,10 +390,20 @@ void calibrateMagnetometer() {
           display.println(F("CAL OK!"));
         } else {
           display.print(F("CAL: "));
-          // Show which axes need more data
-          if (rangeX < CALIBRATION_MIN_RANGE) display.print(F("X"));
-          if (rangeY < CALIBRATION_MIN_RANGE) display.print(F("Y"));
-          if (rangeZ < CALIBRATION_MIN_RANGE) display.print(F("Z"));
+          // Show which axes need more data (only when range is insufficient)
+          bool xNeedsData = rangeX < CALIBRATION_MIN_RANGE;
+          bool yNeedsData = rangeY < CALIBRATION_MIN_RANGE;
+          bool zNeedsData = rangeZ < CALIBRATION_MIN_RANGE;
+          if (xNeedsData) display.print(F("X"));
+          if (yNeedsData) display.print(F("Y"));
+          if (zNeedsData) display.print(F("Z"));
+          // Show remaining time if waiting for minimum time
+          if (!minTimePassed) {
+            unsigned long remainingTime = (CALIBRATION_MIN_TIME - elapsedTime) / 1000;
+            display.print(F(" "));
+            display.print(remainingTime);
+            display.print(F("s"));
+          }
         }
         display.setCursor(0, 11);
         display.print(F("X:"));
