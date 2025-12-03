@@ -329,7 +329,7 @@ void configureIMU() {
   // Set digital low-pass filter
   ICM_20948_dlpcfg_t dlpcfg;
   dlpcfg.a = acc_d50bw4_n68bw8;  // Accel: 50Hz bandwidth
-  dlpcfg.g = gyr_d51bw4_n73bw3; // Gyro: 51Hz bandwidth
+  dlpcfg.g = gyr_d51bw2_n73bw3; // Gyro: 51Hz bandwidth
   imu.setDLPFcfg((ICM_20948_Internal_Acc | ICM_20948_Internal_Gyr), dlpcfg);
   
   // Enable DLPF
