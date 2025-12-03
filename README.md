@@ -18,6 +18,8 @@ Projekt na Arduino Mini Pro do pomiaru pochylenia i wskazywania północy magnet
 - ✅ Jeden ekran OLED ze wszystkimi danymi
 - ✅ Automatyczna kalibracja magnetometru dla osi X i Y (wykrywanie krótkich uruchomień)
 - ✅ Zapisywanie danych kalibracji w EEPROM
+- ✅ Korekcja mapowania osi magnetometru AK09916 (zgodność z układem współrzędnych akcelerometru)
+- ✅ Walidacja danych magnetometru (odrzucanie nieprawidłowych odczytów)
 
 ## Dane lokalizacyjne / Location Data
 

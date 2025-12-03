@@ -74,6 +74,9 @@
 float applyEMAFilter(float newValue, float oldFiltered, float alpha);
 float applyEMAFilterAngle(float newAngle, float oldFiltered, float alpha);
 
+// Magnetometer validation
+bool isMagDataValid();
+
 // ============================================
 // GLOBAL OBJECTS
 // ============================================
@@ -209,25 +212,35 @@ void loop() {
     // Calculate tilt angles from accelerometer
     calculateTilt();
     
-    // Calculate compass heading from magnetometer
-    calculateHeading();
-    
-    // Apply EMA filtering for smooth, stable readings
-    if (!filtersInitialized) {
-      // Initialize filters with first readings
-      rollFiltered = roll;
-      pitchFiltered = pitch;
-      headingMagFiltered = headingMag;
-      headingTrueFiltered = headingTrue;
-      filtersInitialized = true;
-    } else {
-      // Apply EMA filter to linear values (roll, pitch)
-      rollFiltered = applyEMAFilter(roll, rollFiltered, EMA_ALPHA);
-      pitchFiltered = applyEMAFilter(pitch, pitchFiltered, EMA_ALPHA);
+    // Only update heading if magnetometer data is valid
+    // This prevents chaotic readings from invalid sensor data
+    if (isMagDataValid()) {
+      // Calculate compass heading from magnetometer
+      calculateHeading();
       
-      // Apply angular EMA filter to heading (handles 0°/360° wraparound)
-      headingMagFiltered = applyEMAFilterAngle(headingMag, headingMagFiltered, EMA_ALPHA);
-      headingTrueFiltered = applyEMAFilterAngle(headingTrue, headingTrueFiltered, EMA_ALPHA);
+      // Apply EMA filtering for smooth, stable readings
+      if (!filtersInitialized) {
+        // Initialize filters with first readings
+        rollFiltered = roll;
+        pitchFiltered = pitch;
+        headingMagFiltered = headingMag;
+        headingTrueFiltered = headingTrue;
+        filtersInitialized = true;
+      } else {
+        // Apply EMA filter to linear values (roll, pitch)
+        rollFiltered = applyEMAFilter(roll, rollFiltered, EMA_ALPHA);
+        pitchFiltered = applyEMAFilter(pitch, pitchFiltered, EMA_ALPHA);
+        
+        // Apply angular EMA filter to heading (handles 0°/360° wraparound)
+        headingMagFiltered = applyEMAFilterAngle(headingMag, headingMagFiltered, EMA_ALPHA);
+        headingTrueFiltered = applyEMAFilterAngle(headingTrue, headingTrueFiltered, EMA_ALPHA);
+      }
+    } else {
+      // Still update tilt filters even if magnetometer is invalid
+      if (filtersInitialized) {
+        rollFiltered = applyEMAFilter(roll, rollFiltered, EMA_ALPHA);
+        pitchFiltered = applyEMAFilter(pitch, pitchFiltered, EMA_ALPHA);
+      }
     }
   }
   
@@ -294,10 +307,20 @@ void calculateTilt() {
 // ============================================
 
 void calculateHeading() {
-  // Get magnetometer data
-  float mx = imu.magX() - magOffsetX;
-  float my = imu.magY() - magOffsetY;
-  float mz = imu.magZ() - magOffsetZ;
+  // Get raw magnetometer data and apply axis mapping
+  // ICM-20948's magnetometer (AK09916) has different axis orientation than accelerometer/gyro:
+  // - AK09916 X axis corresponds to ICM-20948 Y axis
+  // - AK09916 Y axis corresponds to ICM-20948 X axis (inverted)
+  // - AK09916 Z axis corresponds to ICM-20948 Z axis (inverted)
+  // We need to transform magnetometer readings to match accelerometer coordinate system
+  float magRawX = imu.magY();   // Mag X corresponds to Accel Y
+  float magRawY = -imu.magX();  // Mag Y corresponds to -Accel X (inverted)
+  float magRawZ = -imu.magZ();  // Mag Z corresponds to -Accel Z (inverted)
+  
+  // Apply hard iron calibration (offsets)
+  float mx = magRawX - magOffsetX;
+  float my = magRawY - magOffsetY;
+  float mz = magRawZ - magOffsetZ;
   
   // Apply soft iron calibration
   mx *= magScaleX;
@@ -365,9 +388,11 @@ void calibrateMagnetometer() {
     if (imu.dataReady()) {
       imu.getAGMT();
       
-      float mx = imu.magX();
-      float my = imu.magY();
-      float mz = imu.magZ();
+      // Apply same axis mapping as in calculateHeading()
+      // Transform magnetometer to accelerometer coordinate system
+      float mx = imu.magY();    // Mag X corresponds to Accel Y
+      float my = -imu.magX();   // Mag Y corresponds to -Accel X (inverted)
+      float mz = -imu.magZ();   // Mag Z corresponds to -Accel Z (inverted)
       
       if (mx < magMin[0]) magMin[0] = mx;
       if (mx > magMax[0]) magMax[0] = mx;
@@ -564,6 +589,31 @@ float applyEMAFilterAngle(float newAngle, float oldFiltered, float alpha) {
   filteredAngle = fmod(filteredAngle + 360.0, 360.0);
   
   return filteredAngle;
+}
+
+// ============================================
+// MAGNETOMETER VALIDATION
+// ============================================
+
+// Check if magnetometer data is valid (not zeros or out of range)
+// AK09916 magnetometer has range of approximately +/- 4900 uT
+bool isMagDataValid() {
+  float mx = imu.magX();
+  float my = imu.magY();
+  float mz = imu.magZ();
+  
+  // Check for all zeros (magnetometer not ready or communication error)
+  if (mx == 0 && my == 0 && mz == 0) {
+    return false;
+  }
+  
+  // Check for out-of-range values (AK09916 max is ~4900 uT)
+  const float MAG_MAX = 5000.0;
+  if (fabs(mx) > MAG_MAX || fabs(my) > MAG_MAX || fabs(mz) > MAG_MAX) {
+    return false;
+  }
+  
+  return true;
 }
 
 // ============================================
