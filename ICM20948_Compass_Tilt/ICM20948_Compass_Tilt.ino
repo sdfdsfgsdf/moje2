@@ -470,14 +470,19 @@ void calibrateMagnetometer() {
   magOffsetZ = (magMax[2] + magMin[2]) / 2.0;
   
   // Calculate soft iron scale factors
-  // Protect against division by zero
+  // If axis delta is too small (sensor wasn't rotated properly on that axis),
+  // use default scale of 1.0 to avoid division by zero or unstable results.
+  // MIN_DELTA is a small value to handle floating-point precision issues.
+  const float MIN_DELTA = 1.0;  // Minimum delta value (1.0 uT)
+  
   float deltaX = magMax[0] - magMin[0];
   float deltaY = magMax[1] - magMin[1];
   float deltaZ = magMax[2] - magMin[2];
   
-  if (deltaX == 0) deltaX = 1.0;
-  if (deltaY == 0) deltaY = 1.0;
-  if (deltaZ == 0) deltaZ = 1.0;
+  // Use abs() for reliable floating-point comparison and ensure positive deltas
+  if (abs(deltaX) < MIN_DELTA) deltaX = MIN_DELTA;
+  if (abs(deltaY) < MIN_DELTA) deltaY = MIN_DELTA;
+  if (abs(deltaZ) < MIN_DELTA) deltaZ = MIN_DELTA;
   
   float avgDelta = (deltaX + deltaY + deltaZ) / 3.0;
   
