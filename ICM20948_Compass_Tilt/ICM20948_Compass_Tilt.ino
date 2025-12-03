@@ -1,13 +1,17 @@
 /*
  * ICM-20948 Compass & Tilt Meter for Arduino Mini
- * Hardware: Arduino Mini Pro, ICM-20948, OLED 128x32, Button on D2
+ * Hardware: Arduino Mini Pro, ICM-20948, OLED 128x32
  * Location: Zywiec, Poland (49.68N, 19.19E) - Declination: 5.5E
  * License: MIT
+ * 
+ * Auto-calibration: If 3 consecutive startups last less than 2 seconds,
+ * the device triggers automatic calibration.
  */
 
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <EEPROM.h>
 #include <math.h>
 #include "ICM_20948.h"
 
@@ -24,10 +28,21 @@
 // ICM-20948 settings
 #define ICM_ADDRESS 0x69  // Default I2C address (0x68 if AD0 is low)
 
-// Button settings / Ustawienia przycisku
-#define BUTTON_PIN 2              // Pin przycisku (D2)
-#define LONG_PRESS_TIME 3000      // Czas długiego naciśnięcia (3 sekundy) dla kalibracji
-#define DEBOUNCE_TIME 50          // Czas debouncingu (ms)
+// Auto-calibration settings / Ustawienia automatycznej kalibracji
+#define SHORT_RUN_THRESHOLD 2000  // Czas krótkiego uruchomienia (2 sekundy)
+
+// EEPROM addresses / Adresy EEPROM
+#define EEPROM_MAGIC_ADDR 0           // Magic number to verify data validity
+#define EEPROM_SHORT_RUN_COUNT_ADDR 4 // Counter for short runs
+#define EEPROM_CAL_VALID_ADDR 8       // Calibration data valid flag
+#define EEPROM_MAG_OFFSET_X_ADDR 12   // Magnetometer offset X
+#define EEPROM_MAG_OFFSET_Y_ADDR 16   // Magnetometer offset Y
+#define EEPROM_MAG_OFFSET_Z_ADDR 20   // Magnetometer offset Z
+#define EEPROM_MAG_SCALE_X_ADDR 24    // Magnetometer scale X
+#define EEPROM_MAG_SCALE_Y_ADDR 28    // Magnetometer scale Y
+#define EEPROM_MAG_SCALE_Z_ADDR 32    // Magnetometer scale Z
+
+#define EEPROM_MAGIC_VALUE 0xCAFE     // Magic value to check EEPROM validity
 
 // Magnetic declination for Żywiec, Poland (49.6853°N, 19.1925°E)
 // Declination is approximately 5.5° East (positive value)
@@ -80,20 +95,17 @@ float magScaleZ = 1.0;
 // Display mode (tylko 1 tryb teraz - wszystkie dane)
 unsigned long lastDisplayUpdate = 0;
 
-// Button state variables / Zmienne stanu przycisku
-bool buttonState = HIGH;           // Aktualny stan przycisku (HIGH = nie naciśnięty)
-bool lastButtonState = HIGH;       // Poprzedni stan przycisku
-unsigned long buttonPressTime = 0; // Czas naciśnięcia przycisku
-unsigned long lastDebounceTime = 0;// Czas ostatniego debouncingu
-bool longPressTriggered = false;   // Czy długie naciśnięcie zostało już obsłużone
+// Startup time tracking / Śledzenie czasu uruchomienia
+unsigned long startupTime = 0;
+bool calibrationMode = false;  // True if we entered calibration mode
 
 // ============================================
 // SETUP
 // ============================================
 
 void setup() {
-  // Initialize button pin with internal pull-up
-  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  // Record startup time
+  startupTime = millis();
   
   // Initialize I2C
   Wire.begin();
@@ -134,6 +146,27 @@ void setup() {
   // Configure IMU
   configureIMU();
   
+  // Initialize EEPROM and check for auto-calibration
+  initializeEEPROM();
+  
+  // Increment short run counter (assume this is a short run)
+  // Will be reset to 0 if we survive past threshold
+  incrementShortRunCounter();
+  
+  // Load calibration data from EEPROM
+  loadCalibrationFromEEPROM();
+  
+  // Check if we should enter calibration mode (3rd short run)
+  if (checkAutoCalibration()) {
+    calibrationMode = true;
+    calibrateMagnetometer();
+    // After calibration, show restart message and halt
+    showRestartMessage();
+    while (1) {
+      delay(100);
+    }
+  }
+  
   // Show startup message
   display.clearDisplay();
   display.setCursor(0, 0);
@@ -149,8 +182,8 @@ void setup() {
 // ============================================
 
 void loop() {
-  // Check for button press (calibration)
-  checkButton();
+  // Track running time for short run detection
+  trackRunningTime();
   
   // Read sensor data
   if (imu.dataReady()) {
@@ -393,13 +426,17 @@ void calibrateMagnetometer() {
   magScaleY = avgDelta / deltaY;
   magScaleZ = avgDelta / deltaZ;
   
+  // Save calibration to EEPROM
+  saveCalibrationToEEPROM();
+  
   display.clearDisplay();
   display.setCursor(0, 0);
   if (calibrationComplete) {
     display.println(F("Cal Done!"));
+    display.println(F("Data saved."));
   } else {
     display.println(F("Cal Timeout"));
-    display.println(F("Try again"));
+    display.println(F("Data saved."));
   }
   display.display();
   delay(2000);
@@ -474,35 +511,98 @@ float getDeviationFromNorth(float heading) {
 }
 
 // ============================================
-// BUTTON HANDLING / OBSŁUGA PRZYCISKU
+// EEPROM FUNCTIONS
 // ============================================
 
-void checkButton() {
-  bool reading = digitalRead(BUTTON_PIN);
+void initializeEEPROM() {
+  // Check if EEPROM has valid data
+  uint16_t magic;
+  EEPROM.get(EEPROM_MAGIC_ADDR, magic);
   
-  if (reading != lastButtonState) {
-    lastDebounceTime = millis();
+  if (magic != EEPROM_MAGIC_VALUE) {
+    // First run - initialize EEPROM
+    EEPROM.put(EEPROM_MAGIC_ADDR, (uint16_t)EEPROM_MAGIC_VALUE);
+    EEPROM.put(EEPROM_SHORT_RUN_COUNT_ADDR, (uint8_t)0);
+    EEPROM.put(EEPROM_CAL_VALID_ADDR, (uint8_t)0);
+  }
+}
+
+void loadCalibrationFromEEPROM() {
+  uint8_t calValid;
+  EEPROM.get(EEPROM_CAL_VALID_ADDR, calValid);
+  
+  if (calValid == 1) {
+    EEPROM.get(EEPROM_MAG_OFFSET_X_ADDR, magOffsetX);
+    EEPROM.get(EEPROM_MAG_OFFSET_Y_ADDR, magOffsetY);
+    EEPROM.get(EEPROM_MAG_OFFSET_Z_ADDR, magOffsetZ);
+    EEPROM.get(EEPROM_MAG_SCALE_X_ADDR, magScaleX);
+    EEPROM.get(EEPROM_MAG_SCALE_Y_ADDR, magScaleY);
+    EEPROM.get(EEPROM_MAG_SCALE_Z_ADDR, magScaleZ);
+  }
+}
+
+void saveCalibrationToEEPROM() {
+  EEPROM.put(EEPROM_MAG_OFFSET_X_ADDR, magOffsetX);
+  EEPROM.put(EEPROM_MAG_OFFSET_Y_ADDR, magOffsetY);
+  EEPROM.put(EEPROM_MAG_OFFSET_Z_ADDR, magOffsetZ);
+  EEPROM.put(EEPROM_MAG_SCALE_X_ADDR, magScaleX);
+  EEPROM.put(EEPROM_MAG_SCALE_Y_ADDR, magScaleY);
+  EEPROM.put(EEPROM_MAG_SCALE_Z_ADDR, magScaleZ);
+  EEPROM.put(EEPROM_CAL_VALID_ADDR, (uint8_t)1);
+  
+  // Reset short run counter after calibration
+  EEPROM.put(EEPROM_SHORT_RUN_COUNT_ADDR, (uint8_t)0);
+}
+
+// ============================================
+// AUTO-CALIBRATION DETECTION
+// ============================================
+
+// Check if we should enter calibration mode
+// Returns true if this is the 3rd consecutive short run
+bool checkAutoCalibration() {
+  uint8_t shortRunCount;
+  EEPROM.get(EEPROM_SHORT_RUN_COUNT_ADDR, shortRunCount);
+  
+  // If we have exactly 3 short runs, trigger calibration
+  // (counter was already incremented in setup)
+  if (shortRunCount == 3) {
+    // Reset counter and trigger calibration
+    EEPROM.put(EEPROM_SHORT_RUN_COUNT_ADDR, (uint8_t)0);
+    return true;
   }
   
-  if ((millis() - lastDebounceTime) > DEBOUNCE_TIME) {
-    if (reading != buttonState) {
-      buttonState = reading;
-      
-      if (buttonState == LOW) {
-        buttonPressTime = millis();
-        longPressTriggered = false;
-      }
-    }
-    
-    if (buttonState == LOW && !longPressTriggered) {
-      unsigned long pressDuration = millis() - buttonPressTime;
-      
-      if (pressDuration >= LONG_PRESS_TIME) {
-        longPressTriggered = true;
-        calibrateMagnetometer();
-      }
-    }
-  }
+  return false;
+}
+
+// Track running time and update short run counter if needed
+void trackRunningTime() {
+  static bool longRunRecorded = false;
   
-  lastButtonState = reading;
+  // If we've been running for more than threshold, reset short run counter
+  if (!longRunRecorded && (millis() - startupTime >= SHORT_RUN_THRESHOLD)) {
+    longRunRecorded = true;
+    // This is a long run - reset the short run counter
+    EEPROM.put(EEPROM_SHORT_RUN_COUNT_ADDR, (uint8_t)0);
+  }
+}
+
+void incrementShortRunCounter() {
+  uint8_t shortRunCount;
+  EEPROM.get(EEPROM_SHORT_RUN_COUNT_ADDR, shortRunCount);
+  shortRunCount++;
+  EEPROM.put(EEPROM_SHORT_RUN_COUNT_ADDR, shortRunCount);
+}
+
+// ============================================
+// RESTART MESSAGE
+// ============================================
+
+void showRestartMessage() {
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println(F("Calibration"));
+  display.println(F("complete!"));
+  display.println(F("Please restart."));
+  display.display();
 }
