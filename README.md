@@ -118,15 +118,6 @@ Projekt na Arduino Mini Pro do pomiaru pochylenia i wskazywania północy magnet
 | Krótkie naciśnięcie | Zmiana trybu wyświetlania |
 | Przytrzymanie 3 sek | Uruchomienie kalibracji magnetometru |
 
-### Komendy Serial (115200 baud)
-
-| Komenda | Funkcja |
-|---------|---------|
-| `c` | Uruchom kalibrację magnetometru |
-| `m` | Zmień tryb wyświetlania |
-| `r` | Resetuj kalibrację |
-| `h` | Pokaż pomoc |
-
 ## Tryby wyświetlania
 
 1. **Tryb pochylenia (Tilt)** - Roll, Pitch + mały kompas
