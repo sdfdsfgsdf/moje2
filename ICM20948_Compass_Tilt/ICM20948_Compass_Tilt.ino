@@ -53,6 +53,12 @@
 // Display update interval (ms) - uśrednianie co 250ms
 #define DISPLAY_UPDATE_INTERVAL 250
 
+// Exponential Moving Average (EMA) filter coefficient
+// Higher value = more smoothing, slower response
+// Lower value = less smoothing, faster response
+// Recommended: 0.05-0.15 for stable readings
+#define EMA_ALPHA 0.10
+
 // Calibration settings
 #define CALIBRATION_SAMPLES 100
 #define CALIBRATION_MIN_TIME 10000      // Minimum calibration time (10 seconds)
@@ -78,10 +84,12 @@ float yaw = 0;     // Rotation around Z axis (degrees)
 float headingMag = 0;   // Magnetic heading (degrees)
 float headingTrue = 0;  // True heading (degrees)
 
-// Averaging buffers / Bufory uśredniania
-float rollSum = 0, pitchSum = 0, yawSum = 0;
-float headingMagSum = 0, headingTrueSum = 0;
-uint8_t avgCount = 0;  // uint8_t max 255 - wystarczy dla 250ms
+// EMA filtered values for smooth output
+float rollFiltered = 0;
+float pitchFiltered = 0;
+float headingMagFiltered = 0;
+float headingTrueFiltered = 0;
+bool filtersInitialized = false;
 
 // Magnetometer calibration offsets (hard iron)
 float magOffsetX = 0;
@@ -196,32 +204,28 @@ void loop() {
     // Calculate compass heading from magnetometer
     calculateHeading();
     
-    // Accumulate for averaging / Zbieraj do uśredniania
-    rollSum += roll;
-    pitchSum += pitch;
-    yawSum += yaw;
-    headingMagSum += headingMag;
-    headingTrueSum += headingTrue;
-    avgCount++;
+    // Apply EMA filtering for smooth, stable readings
+    if (!filtersInitialized) {
+      // Initialize filters with first readings
+      rollFiltered = roll;
+      pitchFiltered = pitch;
+      headingMagFiltered = headingMag;
+      headingTrueFiltered = headingTrue;
+      filtersInitialized = true;
+    } else {
+      // Apply EMA filter to linear values (roll, pitch)
+      rollFiltered = applyEMAFilter(roll, rollFiltered, EMA_ALPHA);
+      pitchFiltered = applyEMAFilter(pitch, pitchFiltered, EMA_ALPHA);
+      
+      // Apply angular EMA filter to heading (handles 0°/360° wraparound)
+      headingMagFiltered = applyEMAFilterAngle(headingMag, headingMagFiltered, EMA_ALPHA);
+      headingTrueFiltered = applyEMAFilterAngle(headingTrue, headingTrueFiltered, EMA_ALPHA);
+    }
   }
   
   // Update display at fixed interval (co 250ms)
   if (millis() - lastDisplayUpdate >= DISPLAY_UPDATE_INTERVAL) {
     lastDisplayUpdate = millis();
-    
-    // Calculate averages / Oblicz średnie
-    if (avgCount > 0) {
-      roll = rollSum / avgCount;
-      pitch = pitchSum / avgCount;
-      yaw = yawSum / avgCount;
-      headingMag = headingMagSum / avgCount;
-      headingTrue = headingTrueSum / avgCount;
-      
-      // Reset accumulators / Resetuj akumulatory
-      rollSum = pitchSum = yawSum = 0;
-      headingMagSum = headingTrueSum = 0;
-      avgCount = 0;
-    }
     
     updateDisplay();
   }
@@ -466,33 +470,36 @@ void updateDisplay() {
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   
+  // Use filtered yaw value based on filtered heading
+  float yawFiltered = headingMagFiltered;
+  
   // Jeden ekran - wszystkie dane kompaktowo
-  // Linia 1: X (Roll), Y (Pitch), Z (Yaw)
+  // Linia 1: X (Roll), Y (Pitch), Z (Yaw) - using filtered values
   display.setCursor(0, 0);
   display.print(F("X:"));
-  display.print(roll, 0);
+  display.print(rollFiltered, 0);
   display.print(F(" Y:"));
-  display.print(pitch, 0);
+  display.print(pitchFiltered, 0);
   display.print(F(" Z:"));
-  display.print(yaw, 0);
+  display.print(yawFiltered, 0);
   
-  // Calculate deviations from North
-  float magDeviation = getDeviationFromNorth(headingMag);
-  float geoDeviation = getDeviationFromNorth(headingTrue);
+  // Calculate deviations from North using filtered values
+  float magDeviation = getDeviationFromNorth(headingMagFiltered);
+  float geoDeviation = getDeviationFromNorth(headingTrueFiltered);
   
   // Linia 2: Biegun magnetyczny - odchylenie od północy
   display.setCursor(0, 11);
   display.print(F("Mag:"));
   display.print(magDeviation, 1);
   display.print((char)247);
-  display.print(getCardinalDirection(headingMag));
+  display.print(getCardinalDirection(headingMagFiltered));
   
   // Linia 3: Biegun geograficzny - odchylenie od północy
   display.setCursor(0, 22);
   display.print(F("Geo:"));
   display.print(geoDeviation, 1);
   display.print((char)247);
-  display.print(getCardinalDirection(headingTrue));
+  display.print(getCardinalDirection(headingTrueFiltered));
   
   display.display();
 }
@@ -523,6 +530,44 @@ float getDeviationFromNorth(float heading) {
   }
   // Handle exactly 180° as +180° (due South, maximum deviation)
   return deviation;
+}
+
+// ============================================
+// EMA FILTER FUNCTIONS
+// ============================================
+
+// Apply EMA filter to a linear value (like roll, pitch)
+float applyEMAFilter(float newValue, float oldFiltered, float alpha) {
+  return alpha * newValue + (1.0 - alpha) * oldFiltered;
+}
+
+// Apply EMA filter to an angular value (handles 0°/360° wraparound)
+// This is critical for heading values to prevent jumps at North
+float applyEMAFilterAngle(float newAngle, float oldFiltered, float alpha) {
+  // Convert angles to unit vectors, apply EMA, convert back
+  // This handles the 0°/360° boundary correctly
+  float newRad = newAngle * PI / 180.0;
+  float oldRad = oldFiltered * PI / 180.0;
+  
+  // Convert to unit vectors
+  float newX = cos(newRad);
+  float newY = sin(newRad);
+  float oldX = cos(oldRad);
+  float oldY = sin(oldRad);
+  
+  // Apply EMA to vector components
+  float filteredX = alpha * newX + (1.0 - alpha) * oldX;
+  float filteredY = alpha * newY + (1.0 - alpha) * oldY;
+  
+  // Convert back to angle
+  float filteredAngle = atan2(filteredY, filteredX) * 180.0 / PI;
+  
+  // Normalize to 0-360 degrees
+  if (filteredAngle < 0) {
+    filteredAngle += 360.0;
+  }
+  
+  return filteredAngle;
 }
 
 // ============================================
