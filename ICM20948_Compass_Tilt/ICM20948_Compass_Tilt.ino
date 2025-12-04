@@ -14,9 +14,10 @@
  *   - EMA (Exponential Moving Average) filtering for stable readings
  *   - Angular averaging for compass (handles 0°/360° transition)
  *   - Automatic magnetometer calibration (3 short starts trigger)
- *   - EEPROM storage for calibration data
+ *   - EEPROM storage for calibration data with CRC8 integrity check
  *   - AK09916 axis mapping correction
  *   - Magnetometer data validation
+ *   - Optional Z-axis calibration requirement for high-tilt accuracy
  * 
  * Location: Żywiec, Poland (49.6853°N, 19.1925°E)
  * Magnetic Declination: 5.5° East (2024)
@@ -77,7 +78,13 @@
 #define EEPROM_MAG_SCL_X_ADDR     24      // Mag scale X (4 bytes float)
 #define EEPROM_MAG_SCL_Y_ADDR     28      // Mag scale Y (4 bytes float)
 #define EEPROM_MAG_SCL_Z_ADDR     32      // Mag scale Z (4 bytes float)
+#define EEPROM_CRC_ADDR           36      // CRC8 checksum (1 byte)
 #define EEPROM_MAGIC_VALUE        0xCAFE  // Magic value for EEPROM validation
+
+// --- Calibration Z-axis requirement (for tilted operation) ---
+// Set to true for better accuracy at high tilt angles (>30°)
+// Trade-off: requires more complete rotation during calibration
+#define CALIBRATION_REQUIRE_Z_AXIS  false
 
 // ============================================================================
 // GLOBAL OBJECTS
@@ -154,6 +161,7 @@ void saveCalibration(void);
 void incrementShortRunCount(void);
 bool shouldTriggerCalibration(void);
 void resetShortRunCount(void);
+uint8_t calculateCRC8(void);
 
 // Sensor reading and calculations
 void readSensors(void);
@@ -333,6 +341,60 @@ void configureIMU(void) {
 // ============================================================================
 
 /**
+ * @brief Helper to update CRC8 with a single byte
+ * @param crc Current CRC value
+ * @param data Byte to add to CRC
+ * @return Updated CRC value
+ */
+static uint8_t crc8UpdateByte(uint8_t crc, uint8_t data) {
+  crc ^= data;
+  for (uint8_t bit = 0; bit < 8; bit++) {
+    if (crc & 0x80) {
+      crc = (crc << 1) ^ 0x07;
+    } else {
+      crc <<= 1;
+    }
+  }
+  return crc;
+}
+
+/**
+ * @brief Helper to update CRC8 with a float value
+ * @param crc Current CRC value
+ * @param value Float value to add to CRC
+ * @return Updated CRC value
+ */
+static uint8_t crc8UpdateFloat(uint8_t crc, float value) {
+  uint8_t* ptr = (uint8_t*)&value;
+  for (size_t i = 0; i < sizeof(float); i++) {
+    crc = crc8UpdateByte(crc, ptr[i]);
+  }
+  return crc;
+}
+
+/**
+ * @brief Calculate CRC8 checksum for calibration data from structure
+ * @return CRC8 value
+ * 
+ * Uses polynomial 0x07 (CRC-8-CCITT)
+ * Calculates CRC directly from calibration structure for reliability
+ * Only includes calibration floats (offsets and scales), not the isValid flag
+ */
+uint8_t calculateCRC8(void) {
+  uint8_t crc = 0x00;
+  
+  // Calculate CRC over calibration float values only (6 floats)
+  crc = crc8UpdateFloat(crc, g_magCal.offsetX);
+  crc = crc8UpdateFloat(crc, g_magCal.offsetY);
+  crc = crc8UpdateFloat(crc, g_magCal.offsetZ);
+  crc = crc8UpdateFloat(crc, g_magCal.scaleX);
+  crc = crc8UpdateFloat(crc, g_magCal.scaleY);
+  crc = crc8UpdateFloat(crc, g_magCal.scaleZ);
+  
+  return crc;
+}
+
+/**
  * @brief Initialize EEPROM with default values if needed
  */
 void initEEPROM(void) {
@@ -348,24 +410,50 @@ void initEEPROM(void) {
 
 /**
  * @brief Load magnetometer calibration from EEPROM
+ * 
+ * Validates data integrity using CRC8 checksum before loading
  */
 void loadCalibration(void) {
   uint8_t valid;
   EEPROM.get(EEPROM_CAL_VALID_ADDR, valid);
   
   if (valid == 1) {
+    // First load calibration data to structure
     EEPROM.get(EEPROM_MAG_OFF_X_ADDR, g_magCal.offsetX);
     EEPROM.get(EEPROM_MAG_OFF_Y_ADDR, g_magCal.offsetY);
     EEPROM.get(EEPROM_MAG_OFF_Z_ADDR, g_magCal.offsetZ);
     EEPROM.get(EEPROM_MAG_SCL_X_ADDR, g_magCal.scaleX);
     EEPROM.get(EEPROM_MAG_SCL_Y_ADDR, g_magCal.scaleY);
     EEPROM.get(EEPROM_MAG_SCL_Z_ADDR, g_magCal.scaleZ);
-    g_magCal.isValid = true;
+    
+    // Verify CRC of loaded data
+    uint8_t storedCRC;
+    EEPROM.get(EEPROM_CRC_ADDR, storedCRC);
+    uint8_t calculatedCRC = calculateCRC8();
+    
+    if (storedCRC == calculatedCRC) {
+      g_magCal.isValid = true;
+    } else {
+      // CRC mismatch - calibration data corrupted, reset to defaults
+      g_magCal.offsetX = 0;
+      g_magCal.offsetY = 0;
+      g_magCal.offsetZ = 0;
+      g_magCal.scaleX = 1.0f;
+      g_magCal.scaleY = 1.0f;
+      g_magCal.scaleZ = 1.0f;
+      g_magCal.isValid = false;
+      
+      showMessage("Cal CRC Error", "Recalibrate!");
+      delay(2000);
+      EEPROM.put(EEPROM_CAL_VALID_ADDR, (uint8_t)0);
+    }
   }
 }
 
 /**
  * @brief Save magnetometer calibration to EEPROM
+ * 
+ * Saves calibration data with CRC8 checksum for integrity verification
  */
 void saveCalibration(void) {
   EEPROM.put(EEPROM_MAG_OFF_X_ADDR, g_magCal.offsetX);
@@ -374,6 +462,11 @@ void saveCalibration(void) {
   EEPROM.put(EEPROM_MAG_SCL_X_ADDR, g_magCal.scaleX);
   EEPROM.put(EEPROM_MAG_SCL_Y_ADDR, g_magCal.scaleY);
   EEPROM.put(EEPROM_MAG_SCL_Z_ADDR, g_magCal.scaleZ);
+  
+  // Calculate and save CRC8 checksum
+  uint8_t crc = calculateCRC8();
+  EEPROM.put(EEPROM_CRC_ADDR, crc);
+  
   EEPROM.put(EEPROM_CAL_VALID_ADDR, (uint8_t)1);
   EEPROM.put(EEPROM_SHORT_RUNS_ADDR, (uint8_t)0);
   g_magCal.isValid = true;
@@ -550,7 +643,10 @@ bool validateMagData(void) {
  * 1. Collect min/max values for each axis
  * 2. Calculate hard iron offsets (center of ellipsoid)
  * 3. Calculate soft iron scale factors (normalize ellipsoid)
- * 4. Save to EEPROM
+ * 4. Save to EEPROM with CRC8 checksum
+ * 
+ * Note: If CALIBRATION_REQUIRE_Z_AXIS is true, Z-axis must also reach
+ * minimum range for better accuracy at high tilt angles.
  */
 void runCalibration(void) {
   showMessage("CALIBRATION", "Rotate all axes", "slowly...");
@@ -587,13 +683,20 @@ void runCalibration(void) {
         
         float rangeX = magMax[0] - magMin[0];
         float rangeY = magMax[1] - magMin[1];
+        float rangeZ = magMax[2] - magMin[2];
         unsigned long elapsed = millis() - startTime;
         bool minTimePassed = elapsed >= CALIBRATION_MIN_TIME_MS;
         
-        // Check completion (X and Y axes must have sufficient range)
-        if (rangeX >= CALIBRATION_MIN_RANGE_UT && 
-            rangeY >= CALIBRATION_MIN_RANGE_UT && 
-            minTimePassed) {
+        // Check axis calibration status
+        bool xAxisCalibrated = (rangeX >= CALIBRATION_MIN_RANGE_UT);
+        bool yAxisCalibrated = (rangeY >= CALIBRATION_MIN_RANGE_UT);
+        bool zAxisCalibrated = (rangeZ >= CALIBRATION_MIN_RANGE_UT);
+        
+        // Z-axis requirement: either not required, or already calibrated
+        bool zAxisRequirementMet = !CALIBRATION_REQUIRE_Z_AXIS || zAxisCalibrated;
+        
+        // All requirements must be met for completion
+        if (xAxisCalibrated && yAxisCalibrated && zAxisRequirementMet && minTimePassed) {
           complete = true;
         }
         
@@ -605,8 +708,9 @@ void runCalibration(void) {
           display.println(F("CAL OK!"));
         } else {
           display.print(F("CAL: "));
-          if (rangeX < CALIBRATION_MIN_RANGE_UT) display.print(F("X"));
-          if (rangeY < CALIBRATION_MIN_RANGE_UT) display.print(F("Y"));
+          if (!xAxisCalibrated) display.print(F("X"));
+          if (!yAxisCalibrated) display.print(F("Y"));
+          if (CALIBRATION_REQUIRE_Z_AXIS && !zAxisCalibrated) display.print(F("Z"));
           if (!minTimePassed) {
             display.print(F(" "));
             display.print((CALIBRATION_MIN_TIME_MS - elapsed) / 1000);
@@ -621,7 +725,13 @@ void runCalibration(void) {
         display.print((int)rangeY);
         
         display.setCursor(0, 22);
-        display.print(F("min:"));
+        if (CALIBRATION_REQUIRE_Z_AXIS) {
+          display.print(F("Z:"));
+          display.print((int)rangeZ);
+          display.print(F(" min:"));
+        } else {
+          display.print(F("min:"));
+        }
         display.print((int)CALIBRATION_MIN_RANGE_UT);
         
         display.display();
