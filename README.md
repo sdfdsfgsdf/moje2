@@ -14,7 +14,7 @@ Projekt do pomiaru pochylenia i wskazywania północy magnetycznej oraz geografi
 
 - **ESP32-WROOM-32D** (lub dowolny ESP32 DevKit)
 - **ICM-20948** - 9-DOF IMU (akcelerometr, żyroskop, magnetometr)
-- **OLED 128x64** - wyświetlacz I2C (sterownik SSD1306)
+- **OLED 128x32** - wyświetlacz I2C (sterownik SSD1306)
 - **Przycisk** - do wyzwalania kalibracji (NO, normalnie otwarty)
 
 ## Funkcje / Features
@@ -114,7 +114,7 @@ ICM-20948              ESP32
 - AD0 → GND = adres 0x68
 - AD0 → 3V3 = adres 0x69 (domyślnie w kodzie)
 
-### Połączenia OLED 128x64
+### Połączenia OLED 128x32
 
 ```
 OLED SSD1306           ESP32
@@ -150,7 +150,7 @@ ESP32 GND ─────────────┘
               ┌──────────────┼──────────────┐
               │              │              │
            [3V3]          [VCC]          [VCC]
-         ESP32-WROOM     ICM-20948    OLED 128x64
+         ESP32-WROOM     ICM-20948    OLED 128x32
            [GND]          [GND]          [GND]
               │              │              │
               └──────────────┴──────────────┴────── GND
@@ -160,7 +160,7 @@ ESP32 GND ─────────────┘
          [GPIO22] ───────────────────── [SCL]
                                         [AD0] ── 3V3
 
-       ESP32-WROOM                    OLED 128x64
+       ESP32-WROOM                    OLED 128x32
          [GPIO21] ───────────────────── [SDA]
          [GPIO22] ───────────────────── [SCL]
 
@@ -370,7 +370,7 @@ lib_deps =
 | FPU | Brak | Tak |
 | Kalibracja | 3x restart | 1 przycisk |
 | Zapis | EEPROM + CRC | NVS (Flash) |
-| Wyświetlacz | 128x32 | 128x64 |
+| Wyświetlacz | 128x32 | 128x32 |
 | Próbki żyroskopu | 500 | 1000 |
 | Próbki magnetometru | Min/Max tylko | Do 500 punktów |
 | Aktualizacja wyśw. | 4 Hz | 10 Hz |
