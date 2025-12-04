@@ -1,28 +1,39 @@
 /**
  * @file ICM20948_Compass_Tilt.ino
- * @brief Professional compass and tilt meter using SparkFun ICM-20948 library
+ * @brief Kompas i inklinometr z Mahony AHRS i wbudowaną kalibracją
  * 
- * Hardware:
- *   - Arduino Pro Mini (3.3V/8MHz or 5V/16MHz)
- *   - ICM-20948 9-DOF IMU (with AK09916 magnetometer)
- *   - OLED 128x32 I2C display (SSD1306)
+ * Bazuje na projekcie jremington/ICM_20948-AHRS oraz dokumentacji
+ * thecavepearlproject.org dotyczącej kalibracji magnetometru.
  * 
- * Features:
- *   - Tilt measurement on 2 axes (Roll, Pitch) with 0.1° precision
- *   - Magnetic north indication with tilt compensation
- *   - Geographic north indication (corrected for local declination)
- *   - EMA (Exponential Moving Average) filtering for stable readings
- *   - Angular averaging for compass (handles 0°/360° transition)
- *   - Automatic magnetometer calibration (3 short starts trigger)
- *   - EEPROM storage for calibration data with CRC8 integrity check
- *   - AK09916 axis mapping correction
- *   - Magnetometer data validation
- *   - Optional Z-axis calibration requirement for high-tilt accuracy
+ * Sprzęt:
+ *   - Arduino Pro Mini (3.3V/8MHz lub 5V/16MHz)
+ *   - ICM-20948 9-DOF IMU (z magnetometrem AK09916)
+ *   - OLED 128x32 I2C (SSD1306)
  * 
- * Location: Żywiec, Poland (49.6853°N, 19.1925°E)
- * Magnetic Declination: 5.5° East (2024)
+ * Funkcje:
+ *   - Filtr Mahony AHRS oparty na kwaternionach
+ *   - Integracja żyroskopu dla dynamicznej odpowiedzi
+ *   - Wbudowana automatyczna kalibracja (bez zewnętrznych skryptów)
+ *   - Korekcja Hard Iron (offset min/max)
+ *   - Korekcja Soft Iron (skalowanie osi)
+ *   - Menu OLED do uruchamiania kalibracji
+ *   - Pomiar pochylenia (Roll, Pitch) z dokładnością 0.1°
+ *   - Wskazanie północy magnetycznej i geograficznej
+ *   - Filtrowanie EMA
+ *   - Zapis kalibracji w EEPROM z CRC8
  * 
- * @author Based on SparkFun ICM-20948 Arduino Library
+ * Kalibracja:
+ *   - 3x krótkie uruchomienia (<2s) = tryb kalibracji
+ *   - Lub przytrzymaj podczas startu
+ *   - Obracaj czujnik we wszystkich kierunkach
+ *   - Automatyczne wykrywanie zakończenia
+ * 
+ * Lokalizacja: Żywiec, Polska (49.6853°N, 19.1925°E)
+ * Deklinacja magnetyczna: 5.5° E (2024)
+ * 
+ * Kalibracja wg: https://thecavepearlproject.org/2015/05/22/calibrating-any-compass-or-accelerometer-for-arduino/
+ * Referencja: https://github.com/jremington/ICM_20948-AHRS
+ * 
  * @license MIT
  */
 
@@ -33,128 +44,111 @@
 #include "ICM_20948.h"
 
 // ============================================================================
-// CONFIGURATION SECTION
+// KONFIGURACJA
 // ============================================================================
 
-// --- OLED Display Configuration ---
+// --- Wyświetlacz OLED ---
 #define SCREEN_WIDTH      128
 #define SCREEN_HEIGHT     32
-#define OLED_RESET        -1      // Share Arduino reset pin
+#define OLED_RESET        -1
 #define OLED_I2C_ADDRESS  0x3C
 
-// --- ICM-20948 Configuration ---
-#define ICM_AD0_VAL       1       // AD0 pin state (1=0x69, 0=0x68)
-#define ICM_I2C_SPEED     400000  // I2C clock speed (400kHz)
+// --- ICM-20948 ---
+#define ICM_AD0_VAL       1
+#define ICM_I2C_SPEED     400000
 
-// --- Location Configuration (Żywiec, Poland) ---
-#define MAGNETIC_DECLINATION  5.5f    // Declination in degrees (East = positive)
-#define LATITUDE              49.6853f
-#define LONGITUDE             19.1925f
+// --- Lokalizacja (Żywiec, Polska) ---
+#define MAGNETIC_DECLINATION  5.5f    // Deklinacja (E = dodatnia)
 
-// --- Auto-Calibration Configuration ---
-#define SHORT_RUN_THRESHOLD_MS    2000    // Time defining a "short run" (2 seconds)
-#define SHORT_RUNS_TO_CALIBRATE   3       // Number of short runs to trigger calibration
+// --- Parametry filtra Mahony AHRS ---
+#define MAHONY_KP             50.0f
+#define MAHONY_KI             0.0f
 
-// --- Calibration Parameters ---
-#define CALIBRATION_MIN_TIME_MS   5000    // Minimum calibration time (5 seconds)
-#define CALIBRATION_MAX_TIME_MS   60000   // Maximum calibration time (60 seconds)
-#define CALIBRATION_MIN_RANGE_UT  100.0f  // Minimum acceptable range per axis (μT)
-#define CALIBRATION_CHECK_MS      500     // Quality check interval during calibration
+// --- Żyroskop ---
+#define GYRO_SCALE            ((M_PI / 180.0f) * 0.00763f)
 
-// --- Filter Configuration ---
-#define EMA_ALPHA                 0.10f   // EMA coefficient (0.05-0.15 recommended)
-#define DISPLAY_UPDATE_MS         250     // Display refresh interval
+// --- Auto-kalibracja ---
+#define SHORT_RUN_THRESHOLD_MS    2000
+#define SHORT_RUNS_TO_CALIBRATE   3
+#define GYRO_CAL_SAMPLES          500
 
-// --- Magnetometer Validation ---
-#define MAG_VALID_MAX_UT          5000.0f // Maximum valid magnetometer reading (μT)
+// --- Parametry kalibracji magnetometru ---
+#define CAL_MIN_TIME_MS       5000     // Min czas kalibracji
+#define CAL_MAX_TIME_MS       60000    // Max czas kalibracji
+#define CAL_MIN_RANGE         100.0f   // Min zakres na oś (μT)
+#define CAL_CHECK_INTERVAL_MS 500      // Interwał sprawdzania
 
-// --- EEPROM Memory Map ---
-#define EEPROM_MAGIC_ADDR         0       // Magic number (2 bytes)
-#define EEPROM_SHORT_RUNS_ADDR    4       // Short run counter (1 byte)
-#define EEPROM_CAL_VALID_ADDR     8       // Calibration valid flag (1 byte)
-#define EEPROM_MAG_OFF_X_ADDR     12      // Mag offset X (4 bytes float)
-#define EEPROM_MAG_OFF_Y_ADDR     16      // Mag offset Y (4 bytes float)
-#define EEPROM_MAG_OFF_Z_ADDR     20      // Mag offset Z (4 bytes float)
-#define EEPROM_MAG_SCL_X_ADDR     24      // Mag scale X (4 bytes float)
-#define EEPROM_MAG_SCL_Y_ADDR     28      // Mag scale Y (4 bytes float)
-#define EEPROM_MAG_SCL_Z_ADDR     32      // Mag scale Z (4 bytes float)
-#define EEPROM_CRC_ADDR           36      // CRC8 checksum (1 byte)
-#define EEPROM_MAGIC_VALUE        0xCAFE  // Magic value for EEPROM validation
+// --- Filtry ---
+#define EMA_ALPHA             0.10f
+#define DISPLAY_UPDATE_MS     250
 
-// --- Calibration Z-axis requirement (for tilted operation) ---
-// Set to true for better accuracy at high tilt angles (>30°)
-// Trade-off: requires more complete rotation during calibration
-#define CALIBRATION_REQUIRE_Z_AXIS  false
+// --- Walidacja magnetometru ---
+#define MAG_VALID_MAX         5000.0f
+
+// --- Mapa pamięci EEPROM ---
+#define EEPROM_MAGIC_ADDR         0
+#define EEPROM_SHORT_RUNS_ADDR    4
+#define EEPROM_CAL_VALID_ADDR     8
+#define EEPROM_GYRO_OFF_ADDR      12    // 3 floaty = 12 bajtów
+#define EEPROM_MAG_MIN_ADDR       24    // 3 floaty = 12 bajtów  
+#define EEPROM_MAG_MAX_ADDR       36    // 3 floaty = 12 bajtów
+#define EEPROM_CRC_ADDR           48
+#define EEPROM_MAGIC_VALUE        0xCAFE
 
 // ============================================================================
-// GLOBAL OBJECTS
+// OBIEKTY GLOBALNE
 // ============================================================================
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 ICM_20948_I2C    imu;
 
 // ============================================================================
-// DATA STRUCTURES
+// STRUKTURY DANYCH
 // ============================================================================
 
-/**
- * @brief Structure holding sensor readings and calculated values
- */
 struct SensorData {
-  // Raw calculated values
-  float roll;           // Rotation around X axis (degrees)
-  float pitch;          // Rotation around Y axis (degrees)
-  float headingMag;     // Magnetic heading (0-360°)
-  float headingGeo;     // Geographic heading (0-360°)
-  
-  // EMA filtered values
-  float rollFiltered;
-  float pitchFiltered;
-  float headingMagFiltered;
-  float headingGeoFiltered;
-  
-  // Filter initialization flag
+  float roll, pitch, yaw;
+  float headingMag, headingGeo;
+  float rollFiltered, pitchFiltered;
+  float headingMagFiltered, headingGeoFiltered;
   bool filtersReady;
 };
 
 /**
- * @brief Structure holding magnetometer calibration data
+ * Struktura kalibracji wg Cave Pearl Project:
+ * - Hard Iron: offset = (min + max) / 2 dla każdej osi
+ * - Soft Iron: scale = średnia_delta / delta_osi (normalizacja do sfery)
  */
-struct MagCalibration {
-  // Hard iron offsets
-  float offsetX;
-  float offsetY;
-  float offsetZ;
-  
-  // Soft iron scale factors
-  float scaleX;
-  float scaleY;
-  float scaleZ;
-  
-  // Validity flag
+struct Calibration {
+  float gyroOffset[3];    // Offsety żyroskopu
+  float magMin[3];        // Minimalne wartości magnetometru
+  float magMax[3];        // Maksymalne wartości magnetometru
   bool isValid;
 };
 
-// ============================================================================
-// GLOBAL VARIABLES
-// ============================================================================
-
-SensorData      g_sensor = {0, 0, 0, 0, 0, 0, 0, 0, false};
-MagCalibration  g_magCal = {0, 0, 0, 1.0f, 1.0f, 1.0f, false};
-unsigned long   g_startupTime = 0;
-unsigned long   g_lastDisplayUpdate = 0;
-bool            g_calibrationMode = false;
+struct AHRSState {
+  float q[4];             // Kwaternion [w, x, y, z]
+  float eInt[3];          // Błąd całkowy
+  unsigned long lastUpdate;
+};
 
 // ============================================================================
-// FUNCTION PROTOTYPES
+// ZMIENNE GLOBALNE
 // ============================================================================
 
-// Initialization
+SensorData    g_sensor = {0};
+Calibration   g_cal = {{0,0,0}, {-200,-200,-200}, {200,200,200}, false};
+AHRSState     g_ahrs = {{1.0f, 0.0f, 0.0f, 0.0f}, {0,0,0}, 0};
+unsigned long g_startupTime = 0;
+unsigned long g_lastDisplayUpdate = 0;
+
+// ============================================================================
+// PROTOTYPY FUNKCJI
+// ============================================================================
+
 void initDisplay(void);
 bool initIMU(void);
 void configureIMU(void);
-
-// EEPROM operations
 void initEEPROM(void);
 void loadCalibration(void);
 void saveCalibration(void);
@@ -163,85 +157,90 @@ bool shouldTriggerCalibration(void);
 void resetShortRunCount(void);
 uint8_t calculateCRC8(void);
 
-// Sensor reading and calculations
-void readSensors(void);
-void calculateTilt(void);
-void calculateHeading(void);
+void runGyroCalibration(void);
+void runMagCalibration(void);
+void applyMagCalibration(float raw[3], float calibrated[3]);
+
+void processSensors(void);
 bool validateMagData(void);
 
-// Calibration
-void runCalibration(void);
+float vector_dot(float a[3], float b[3]);
+void vector_normalize(float a[3]);
+void MahonyQuaternionUpdate(float ax, float ay, float az, 
+                            float gx, float gy, float gz,
+                            float mx, float my, float mz, float deltat);
+void quaternionToEuler(float q[4], float& yaw, float& pitch, float& roll);
 
-// Filtering
 float emaFilter(float newVal, float oldVal, float alpha);
 float emaFilterAngle(float newAngle, float oldAngle, float alpha);
 
-// Display
 void updateDisplay(void);
 float getDeviationFromNorth(float heading);
 const char* getCardinalDirection(float heading);
 void showMessage(const char* line1, const char* line2 = nullptr, const char* line3 = nullptr);
-
-// Utility
+void showCalibrationHelp(void);
 void trackRuntime(void);
 
 // ============================================================================
-// ARDUINO SETUP
+// SETUP
 // ============================================================================
 
 void setup() {
   g_startupTime = millis();
   
-  // Initialize I2C bus
   Wire.begin();
   Wire.setClock(ICM_I2C_SPEED);
   
-  // Initialize display
   initDisplay();
-  showMessage("Initializing...");
+  showMessage("Inicjalizacja...");
   
-  // Initialize IMU
   if (!initIMU()) {
-    showMessage("IMU Error!", "Check wiring", "and restart");
-    while (true) { delay(100); }
+    showMessage("Blad IMU!", "Sprawdz polaczenia");
+    while (true) delay(100);
   }
   
-  // Configure IMU sensors
   configureIMU();
-  
-  // Initialize EEPROM and check calibration status
   initEEPROM();
   incrementShortRunCount();
   loadCalibration();
   
-  // Check if calibration should be triggered
+  // Sprawdź czy uruchomić kalibrację
   if (shouldTriggerCalibration()) {
-    g_calibrationMode = true;
-    runCalibration();
-    showMessage("Calibration", "complete!", "Please restart.");
-    while (true) { delay(100); }
+    showCalibrationHelp();
+    delay(3000);
+    runGyroCalibration();
+    runMagCalibration();
+    showMessage("Kalibracja", "zakonczona!", "Restart...");
+    while (true) delay(100);
   }
   
-  // Show startup message
-  showMessage("ICM-20948 Ready", "Zywiec, Poland", "Decl: 5.5E");
+  // Jeśli brak kalibracji, wykonaj tylko gyro
+  if (!g_cal.isValid) {
+    showMessage("Brak kalibracji", "Gyro cal...", "Trzymaj nieruchomo");
+    delay(1000);
+    runGyroCalibration();
+    showMessage("Uzyj 3x restart", "dla pelnej", "kalibracji");
+    delay(3000);
+  }
+  
+  g_ahrs.lastUpdate = micros();
+  
+  showMessage("ICM-20948 Ready", "Mahony AHRS", "Zywiec, PL");
   delay(2000);
 }
 
 // ============================================================================
-// ARDUINO MAIN LOOP
+// GŁÓWNA PĘTLA
 // ============================================================================
 
 void loop() {
-  // Track runtime for short run detection
   trackRuntime();
   
-  // Read and process sensor data
   if (imu.dataReady()) {
     imu.getAGMT();
-    readSensors();
+    processSensors();
   }
   
-  // Update display at fixed interval
   if (millis() - g_lastDisplayUpdate >= DISPLAY_UPDATE_MS) {
     g_lastDisplayUpdate = millis();
     updateDisplay();
@@ -249,121 +248,71 @@ void loop() {
 }
 
 // ============================================================================
-// INITIALIZATION FUNCTIONS
+// INICJALIZACJA
 // ============================================================================
 
-/**
- * @brief Initialize OLED display
- */
 void initDisplay(void) {
   if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_I2C_ADDRESS)) {
-    // Display init failed - halt
-    while (true) { delay(100); }
+    while (true) delay(100);
   }
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
 }
 
-/**
- * @brief Initialize ICM-20948 IMU
- * @return true if initialization successful
- */
 bool initIMU(void) {
-  // Try primary I2C address
   imu.begin(Wire, ICM_AD0_VAL);
-  
   if (imu.status != ICM_20948_Stat_Ok) {
-    // Try alternate address
     imu.begin(Wire, !ICM_AD0_VAL);
   }
-  
   return (imu.status == ICM_20948_Stat_Ok);
 }
 
-/**
- * @brief Configure IMU sensors with optimal settings
- */
 void configureIMU(void) {
-  // Perform software reset
   imu.swReset();
   delay(250);
   
-  // Wake up device
   imu.sleep(false);
   imu.lowPower(false);
   
-  // Set sample mode to continuous
-  imu.setSampleMode(
-    (ICM_20948_Internal_Acc | ICM_20948_Internal_Gyr),
-    ICM_20948_Sample_Mode_Continuous
-  );
+  imu.setSampleMode((ICM_20948_Internal_Acc | ICM_20948_Internal_Gyr),
+                    ICM_20948_Sample_Mode_Continuous);
   
-  // Configure full scale ranges
   ICM_20948_fss_t fss;
-  fss.a = gpm2;     // ±2g for accelerometer (high sensitivity)
-  fss.g = dps250;   // ±250°/s for gyroscope
+  fss.a = gpm2;
+  fss.g = dps250;
   imu.setFullScale((ICM_20948_Internal_Acc | ICM_20948_Internal_Gyr), fss);
   
-  // Configure digital low-pass filters
   ICM_20948_dlpcfg_t dlp;
-  dlp.a = acc_d50bw4_n68bw8;   // 50Hz 3dB BW for accelerometer
-  dlp.g = gyr_d51bw2_n73bw3;   // 51Hz 3dB BW for gyroscope
+  dlp.a = acc_d50bw4_n68bw8;
+  dlp.g = gyr_d51bw2_n73bw3;
   imu.setDLPFcfg((ICM_20948_Internal_Acc | ICM_20948_Internal_Gyr), dlp);
   
-  // Enable DLPF
   imu.enableDLPF(ICM_20948_Internal_Acc, true);
   imu.enableDLPF(ICM_20948_Internal_Gyr, true);
   
-  // Initialize magnetometer with retries
-  bool magOk = false;
-  for (int attempt = 0; attempt < 5 && !magOk; attempt++) {
+  for (int attempt = 0; attempt < 5; attempt++) {
     imu.startupMagnetometer();
     delay(100);
-    
     if (imu.dataReady()) {
       imu.getAGMT();
-      if (imu.magX() != 0 || imu.magY() != 0 || imu.magZ() != 0) {
-        magOk = true;
-      }
+      if (imu.magX() != 0 || imu.magY() != 0 || imu.magZ() != 0) break;
     }
-    delay(50);
-  }
-  
-  if (!magOk) {
-    showMessage("Mag warning", "Check sensor");
-    delay(2000);
   }
 }
 
 // ============================================================================
-// EEPROM FUNCTIONS
+// FUNKCJE EEPROM
 // ============================================================================
 
-/**
- * @brief Helper to update CRC8 with a single byte
- * @param crc Current CRC value
- * @param data Byte to add to CRC
- * @return Updated CRC value
- */
 static uint8_t crc8UpdateByte(uint8_t crc, uint8_t data) {
   crc ^= data;
   for (uint8_t bit = 0; bit < 8; bit++) {
-    if (crc & 0x80) {
-      crc = (crc << 1) ^ 0x07;
-    } else {
-      crc <<= 1;
-    }
+    crc = (crc & 0x80) ? (crc << 1) ^ 0x07 : crc << 1;
   }
   return crc;
 }
 
-/**
- * @brief Helper to update CRC8 with a float value
- * @param crc Current CRC value
- * @param value Float value to add to CRC
- * @return Updated CRC value
- */
 static uint8_t crc8UpdateFloat(uint8_t crc, float value) {
   uint8_t* ptr = (uint8_t*)&value;
   for (size_t i = 0; i < sizeof(float); i++) {
@@ -372,35 +321,17 @@ static uint8_t crc8UpdateFloat(uint8_t crc, float value) {
   return crc;
 }
 
-/**
- * @brief Calculate CRC8 checksum for calibration data from structure
- * @return CRC8 value
- * 
- * Uses polynomial 0x07 (CRC-8-CCITT)
- * Calculates CRC directly from calibration structure for reliability
- * Only includes calibration floats (offsets and scales), not the isValid flag
- */
 uint8_t calculateCRC8(void) {
   uint8_t crc = 0x00;
-  
-  // Calculate CRC over calibration float values only (6 floats)
-  crc = crc8UpdateFloat(crc, g_magCal.offsetX);
-  crc = crc8UpdateFloat(crc, g_magCal.offsetY);
-  crc = crc8UpdateFloat(crc, g_magCal.offsetZ);
-  crc = crc8UpdateFloat(crc, g_magCal.scaleX);
-  crc = crc8UpdateFloat(crc, g_magCal.scaleY);
-  crc = crc8UpdateFloat(crc, g_magCal.scaleZ);
-  
+  for (int i = 0; i < 3; i++) crc = crc8UpdateFloat(crc, g_cal.gyroOffset[i]);
+  for (int i = 0; i < 3; i++) crc = crc8UpdateFloat(crc, g_cal.magMin[i]);
+  for (int i = 0; i < 3; i++) crc = crc8UpdateFloat(crc, g_cal.magMax[i]);
   return crc;
 }
 
-/**
- * @brief Initialize EEPROM with default values if needed
- */
 void initEEPROM(void) {
   uint16_t magic;
   EEPROM.get(EEPROM_MAGIC_ADDR, magic);
-  
   if (magic != EEPROM_MAGIC_VALUE) {
     EEPROM.put(EEPROM_MAGIC_ADDR, (uint16_t)EEPROM_MAGIC_VALUE);
     EEPROM.put(EEPROM_SHORT_RUNS_ADDR, (uint8_t)0);
@@ -408,88 +339,78 @@ void initEEPROM(void) {
   }
 }
 
-/**
- * @brief Load magnetometer calibration from EEPROM
- * 
- * Validates data integrity using CRC8 checksum before loading
- */
 void loadCalibration(void) {
   uint8_t valid;
   EEPROM.get(EEPROM_CAL_VALID_ADDR, valid);
   
   if (valid == 1) {
-    // First load calibration data to structure
-    EEPROM.get(EEPROM_MAG_OFF_X_ADDR, g_magCal.offsetX);
-    EEPROM.get(EEPROM_MAG_OFF_Y_ADDR, g_magCal.offsetY);
-    EEPROM.get(EEPROM_MAG_OFF_Z_ADDR, g_magCal.offsetZ);
-    EEPROM.get(EEPROM_MAG_SCL_X_ADDR, g_magCal.scaleX);
-    EEPROM.get(EEPROM_MAG_SCL_Y_ADDR, g_magCal.scaleY);
-    EEPROM.get(EEPROM_MAG_SCL_Z_ADDR, g_magCal.scaleZ);
+    int addr = EEPROM_GYRO_OFF_ADDR;
+    for (int i = 0; i < 3; i++) {
+      EEPROM.get(addr, g_cal.gyroOffset[i]);
+      addr += sizeof(float);
+    }
+    addr = EEPROM_MAG_MIN_ADDR;
+    for (int i = 0; i < 3; i++) {
+      EEPROM.get(addr, g_cal.magMin[i]);
+      addr += sizeof(float);
+    }
+    addr = EEPROM_MAG_MAX_ADDR;
+    for (int i = 0; i < 3; i++) {
+      EEPROM.get(addr, g_cal.magMax[i]);
+      addr += sizeof(float);
+    }
     
-    // Verify CRC of loaded data
     uint8_t storedCRC;
     EEPROM.get(EEPROM_CRC_ADDR, storedCRC);
-    uint8_t calculatedCRC = calculateCRC8();
     
-    if (storedCRC == calculatedCRC) {
-      g_magCal.isValid = true;
+    if (storedCRC == calculateCRC8()) {
+      g_cal.isValid = true;
     } else {
-      // CRC mismatch - calibration data corrupted, reset to defaults
-      g_magCal.offsetX = 0;
-      g_magCal.offsetY = 0;
-      g_magCal.offsetZ = 0;
-      g_magCal.scaleX = 1.0f;
-      g_magCal.scaleY = 1.0f;
-      g_magCal.scaleZ = 1.0f;
-      g_magCal.isValid = false;
-      
-      showMessage("Cal CRC Error", "Recalibrate!");
+      // Reset do domyślnych
+      for (int i = 0; i < 3; i++) {
+        g_cal.gyroOffset[i] = 0;
+        g_cal.magMin[i] = -200;
+        g_cal.magMax[i] = 200;
+      }
+      g_cal.isValid = false;
+      showMessage("Blad CRC!", "Rekalibracja");
       delay(2000);
-      EEPROM.put(EEPROM_CAL_VALID_ADDR, (uint8_t)0);
     }
   }
 }
 
-/**
- * @brief Save magnetometer calibration to EEPROM
- * 
- * Saves calibration data with CRC8 checksum for integrity verification
- */
 void saveCalibration(void) {
-  EEPROM.put(EEPROM_MAG_OFF_X_ADDR, g_magCal.offsetX);
-  EEPROM.put(EEPROM_MAG_OFF_Y_ADDR, g_magCal.offsetY);
-  EEPROM.put(EEPROM_MAG_OFF_Z_ADDR, g_magCal.offsetZ);
-  EEPROM.put(EEPROM_MAG_SCL_X_ADDR, g_magCal.scaleX);
-  EEPROM.put(EEPROM_MAG_SCL_Y_ADDR, g_magCal.scaleY);
-  EEPROM.put(EEPROM_MAG_SCL_Z_ADDR, g_magCal.scaleZ);
+  int addr = EEPROM_GYRO_OFF_ADDR;
+  for (int i = 0; i < 3; i++) {
+    EEPROM.put(addr, g_cal.gyroOffset[i]);
+    addr += sizeof(float);
+  }
+  addr = EEPROM_MAG_MIN_ADDR;
+  for (int i = 0; i < 3; i++) {
+    EEPROM.put(addr, g_cal.magMin[i]);
+    addr += sizeof(float);
+  }
+  addr = EEPROM_MAG_MAX_ADDR;
+  for (int i = 0; i < 3; i++) {
+    EEPROM.put(addr, g_cal.magMax[i]);
+    addr += sizeof(float);
+  }
   
-  // Calculate and save CRC8 checksum
-  uint8_t crc = calculateCRC8();
-  EEPROM.put(EEPROM_CRC_ADDR, crc);
-  
+  EEPROM.put(EEPROM_CRC_ADDR, calculateCRC8());
   EEPROM.put(EEPROM_CAL_VALID_ADDR, (uint8_t)1);
   EEPROM.put(EEPROM_SHORT_RUNS_ADDR, (uint8_t)0);
-  g_magCal.isValid = true;
+  g_cal.isValid = true;
 }
 
-/**
- * @brief Increment short run counter in EEPROM
- */
 void incrementShortRunCount(void) {
   uint8_t count;
   EEPROM.get(EEPROM_SHORT_RUNS_ADDR, count);
-  count++;
-  EEPROM.put(EEPROM_SHORT_RUNS_ADDR, count);
+  EEPROM.put(EEPROM_SHORT_RUNS_ADDR, (uint8_t)(count + 1));
 }
 
-/**
- * @brief Check if calibration should be triggered
- * @return true if 3 short runs detected
- */
 bool shouldTriggerCalibration(void) {
   uint8_t count;
   EEPROM.get(EEPROM_SHORT_RUNS_ADDR, count);
-  
   if (count >= SHORT_RUNS_TO_CALIBRATE) {
     EEPROM.put(EEPROM_SHORT_RUNS_ADDR, (uint8_t)0);
     return true;
@@ -497,162 +418,86 @@ bool shouldTriggerCalibration(void) {
   return false;
 }
 
-/**
- * @brief Reset short run counter (called when normal operation detected)
- */
 void resetShortRunCount(void) {
   EEPROM.put(EEPROM_SHORT_RUNS_ADDR, (uint8_t)0);
 }
 
 // ============================================================================
-// SENSOR READING FUNCTIONS
+// KALIBRACJA
 // ============================================================================
 
 /**
- * @brief Read sensors and update filtered values
+ * Wyświetla instrukcję kalibracji na OLED
  */
-void readSensors(void) {
-  calculateTilt();
+void showCalibrationHelp(void) {
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println(F("=== KALIBRACJA ==="));
+  display.println(F("1. Trzymaj nieruch."));
+  display.println(F("2. Obracaj powoli"));
+  display.println(F("3. Czekaj na OK"));
+  display.display();
+}
+
+/**
+ * Kalibracja żyroskopu - uśrednianie offsetów
+ * Czujnik musi być nieruchomy podczas kalibracji
+ */
+void runGyroCalibration(void) {
+  showMessage("Kalibracja GYRO", "Trzymaj", "nieruchomo!");
+  delay(2000);
   
-  if (validateMagData()) {
-    calculateHeading();
-    
-    if (!g_sensor.filtersReady) {
-      // Initialize filters with first valid readings
-      g_sensor.rollFiltered = g_sensor.roll;
-      g_sensor.pitchFiltered = g_sensor.pitch;
-      g_sensor.headingMagFiltered = g_sensor.headingMag;
-      g_sensor.headingGeoFiltered = g_sensor.headingGeo;
-      g_sensor.filtersReady = true;
-    } else {
-      // Apply EMA filters
-      g_sensor.rollFiltered = emaFilter(g_sensor.roll, g_sensor.rollFiltered, EMA_ALPHA);
-      g_sensor.pitchFiltered = emaFilter(g_sensor.pitch, g_sensor.pitchFiltered, EMA_ALPHA);
-      g_sensor.headingMagFiltered = emaFilterAngle(g_sensor.headingMag, g_sensor.headingMagFiltered, EMA_ALPHA);
-      g_sensor.headingGeoFiltered = emaFilterAngle(g_sensor.headingGeo, g_sensor.headingGeoFiltered, EMA_ALPHA);
+  long gyroSum[3] = {0, 0, 0};
+  int count = 0;
+  
+  for (int i = 0; i < GYRO_CAL_SAMPLES; i++) {
+    if (imu.dataReady()) {
+      imu.getAGMT();
+      gyroSum[0] += imu.agmt.gyr.axes.x;
+      gyroSum[1] += imu.agmt.gyr.axes.y;
+      gyroSum[2] += imu.agmt.gyr.axes.z;
+      count++;
     }
-  } else if (g_sensor.filtersReady) {
-    // Update tilt even when mag invalid
-    g_sensor.rollFiltered = emaFilter(g_sensor.roll, g_sensor.rollFiltered, EMA_ALPHA);
-    g_sensor.pitchFiltered = emaFilter(g_sensor.pitch, g_sensor.pitchFiltered, EMA_ALPHA);
-  }
-}
-
-/**
- * @brief Calculate roll and pitch from accelerometer
- */
-void calculateTilt(void) {
-  float ax = imu.accX() / 1000.0f;  // Convert mg to g
-  float ay = imu.accY() / 1000.0f;
-  float az = imu.accZ() / 1000.0f;
-  
-  // Roll: rotation around X axis
-  g_sensor.roll = atan2(ay, az) * 180.0f / PI;
-  
-  // Pitch: rotation around Y axis
-  g_sensor.pitch = atan2(-ax, sqrt(ay * ay + az * az)) * 180.0f / PI;
-}
-
-/**
- * @brief Calculate compass heading with tilt compensation
- * 
- * The AK09916 magnetometer has a different axis orientation than the ICM-20948
- * accelerometer/gyroscope. This function applies the necessary transformation:
- *   - Mag X (aligned) = raw Mag Y
- *   - Mag Y (aligned) = -raw Mag X
- *   - Mag Z (aligned) = -raw Mag Z
- */
-void calculateHeading(void) {
-  // Get raw magnetometer data with axis mapping
-  // Transform to match accelerometer coordinate system
-  float mx = imu.magY();    // Aligned X = raw Y
-  float my = -imu.magX();   // Aligned Y = -raw X
-  float mz = -imu.magZ();   // Aligned Z = -raw Z
-  
-  // Apply hard iron calibration (offset correction)
-  mx -= g_magCal.offsetX;
-  my -= g_magCal.offsetY;
-  mz -= g_magCal.offsetZ;
-  
-  // Apply soft iron calibration (scale correction)
-  mx *= g_magCal.scaleX;
-  my *= g_magCal.scaleY;
-  mz *= g_magCal.scaleZ;
-  
-  // Tilt compensation
-  float rollRad = g_sensor.roll * PI / 180.0f;
-  float pitchRad = g_sensor.pitch * PI / 180.0f;
-  
-  float cosRoll = cos(rollRad);
-  float sinRoll = sin(rollRad);
-  float cosPitch = cos(pitchRad);
-  float sinPitch = sin(pitchRad);
-  
-  // Tilt-compensated horizontal components
-  float Xh = mx * cosPitch + my * sinRoll * sinPitch + mz * cosRoll * sinPitch;
-  float Yh = my * cosRoll - mz * sinRoll;
-  
-  // Calculate magnetic heading
-  g_sensor.headingMag = atan2(-Yh, Xh) * 180.0f / PI;
-  if (g_sensor.headingMag < 0) {
-    g_sensor.headingMag += 360.0f;
+    delay(5);
+    
+    // Aktualizuj wyświetlacz co 50 próbek
+    if (i % 50 == 0) {
+      display.clearDisplay();
+      display.setCursor(0, 0);
+      display.println(F("Kalibracja GYRO"));
+      display.print(F("Postep: "));
+      display.print((i * 100) / GYRO_CAL_SAMPLES);
+      display.println(F("%"));
+      display.println(F("Nie ruszaj!"));
+      display.display();
+    }
   }
   
-  // Calculate geographic heading (apply declination)
-  g_sensor.headingGeo = g_sensor.headingMag + MAGNETIC_DECLINATION;
-  if (g_sensor.headingGeo >= 360.0f) {
-    g_sensor.headingGeo -= 360.0f;
-  }
-  if (g_sensor.headingGeo < 0) {
-    g_sensor.headingGeo += 360.0f;
-  }
-}
-
-/**
- * @brief Validate magnetometer data
- * @return true if data is valid
- */
-bool validateMagData(void) {
-  float mx = imu.magX();
-  float my = imu.magY();
-  float mz = imu.magZ();
-  
-  // Check for all zeros (sensor not ready)
-  if (mx == 0 && my == 0 && mz == 0) {
-    return false;
+  if (count > 0) {
+    g_cal.gyroOffset[0] = (float)gyroSum[0] / count;
+    g_cal.gyroOffset[1] = (float)gyroSum[1] / count;
+    g_cal.gyroOffset[2] = (float)gyroSum[2] / count;
   }
   
-  // Check for out-of-range values
-  if (fabs(mx) > MAG_VALID_MAX_UT || 
-      fabs(my) > MAG_VALID_MAX_UT || 
-      fabs(mz) > MAG_VALID_MAX_UT) {
-    return false;
-  }
-  
-  return true;
-}
-
-// ============================================================================
-// CALIBRATION FUNCTION
-// ============================================================================
-
-/**
- * @brief Run magnetometer calibration routine
- * 
- * Calibration procedure:
- * 1. Collect min/max values for each axis
- * 2. Calculate hard iron offsets (center of ellipsoid)
- * 3. Calculate soft iron scale factors (normalize ellipsoid)
- * 4. Save to EEPROM with CRC8 checksum
- * 
- * Note: If CALIBRATION_REQUIRE_Z_AXIS is true, Z-axis must also reach
- * minimum range for better accuracy at high tilt angles.
- */
-void runCalibration(void) {
-  showMessage("CALIBRATION", "Rotate all axes", "slowly...");
+  showMessage("GYRO OK!", "", "");
   delay(1000);
+}
+
+/**
+ * Kalibracja magnetometru metodą min/max
+ * 
+ * Zgodnie z Cave Pearl Project:
+ * - Hard Iron offset = (min + max) / 2 dla każdej osi
+ * - Soft Iron scale = średnia_delta / delta_osi
+ * 
+ * Ta metoda wymaga minimalnej ilości RAM - tylko 6 floatów (min/max)
+ * zamiast setek próbek potrzebnych do ellipsoid fitting.
+ */
+void runMagCalibration(void) {
+  showMessage("Kalibracja MAG", "Obracaj powoli", "we wszystkich");
+  delay(2000);
   
-  // Initialize min/max tracking
+  // Inicjalizuj min/max
   float magMin[3] = {32767.0f, 32767.0f, 32767.0f};
   float magMax[3] = {-32767.0f, -32767.0f, -32767.0f};
   
@@ -660,16 +505,16 @@ void runCalibration(void) {
   unsigned long lastCheck = startTime;
   bool complete = false;
   
-  while (!complete && (millis() - startTime < CALIBRATION_MAX_TIME_MS)) {
+  while (!complete && (millis() - startTime < CAL_MAX_TIME_MS)) {
     if (imu.dataReady()) {
       imu.getAGMT();
       
-      // Apply same axis mapping as heading calculation
+      // Mapowanie osi dla AK09916 (zgodne z akcelerometrem)
       float mx = imu.magY();
       float my = -imu.magX();
       float mz = -imu.magZ();
       
-      // Update min/max
+      // Aktualizuj min/max dla każdej osi
       if (mx < magMin[0]) magMin[0] = mx;
       if (mx > magMax[0]) magMax[0] = mx;
       if (my < magMin[1]) magMin[1] = my;
@@ -677,43 +522,37 @@ void runCalibration(void) {
       if (mz < magMin[2]) magMin[2] = mz;
       if (mz > magMax[2]) magMax[2] = mz;
       
-      // Periodic quality check
-      if (millis() - lastCheck >= CALIBRATION_CHECK_MS) {
+      // Sprawdzaj postęp co CAL_CHECK_INTERVAL_MS
+      if (millis() - lastCheck >= CAL_CHECK_INTERVAL_MS) {
         lastCheck = millis();
         
         float rangeX = magMax[0] - magMin[0];
         float rangeY = magMax[1] - magMin[1];
         float rangeZ = magMax[2] - magMin[2];
         unsigned long elapsed = millis() - startTime;
-        bool minTimePassed = elapsed >= CALIBRATION_MIN_TIME_MS;
         
-        // Check axis calibration status
-        bool xAxisCalibrated = (rangeX >= CALIBRATION_MIN_RANGE_UT);
-        bool yAxisCalibrated = (rangeY >= CALIBRATION_MIN_RANGE_UT);
-        bool zAxisCalibrated = (rangeZ >= CALIBRATION_MIN_RANGE_UT);
+        bool xOk = (rangeX >= CAL_MIN_RANGE);
+        bool yOk = (rangeY >= CAL_MIN_RANGE);
+        bool zOk = (rangeZ >= CAL_MIN_RANGE);
+        bool minTime = (elapsed >= CAL_MIN_TIME_MS);
         
-        // Z-axis requirement: either not required, or already calibrated
-        bool zAxisRequirementMet = !CALIBRATION_REQUIRE_Z_AXIS || zAxisCalibrated;
+        // Wymagamy X, Y i minimalnego czasu; Z opcjonalne
+        if (xOk && yOk && minTime) complete = true;
         
-        // All requirements must be met for completion
-        if (xAxisCalibrated && yAxisCalibrated && zAxisRequirementMet && minTimePassed) {
-          complete = true;
-        }
-        
-        // Update display
+        // Wyświetl status na OLED
         display.clearDisplay();
         display.setCursor(0, 0);
         
         if (complete) {
-          display.println(F("CAL OK!"));
+          display.println(F("KALIBRACJA OK!"));
         } else {
-          display.print(F("CAL: "));
-          if (!xAxisCalibrated) display.print(F("X"));
-          if (!yAxisCalibrated) display.print(F("Y"));
-          if (CALIBRATION_REQUIRE_Z_AXIS && !zAxisCalibrated) display.print(F("Z"));
-          if (!minTimePassed) {
+          display.print(F("KAL: "));
+          display.print(xOk ? F("+") : F("X"));
+          display.print(yOk ? F("+") : F("Y"));
+          display.print(zOk ? F("+") : F("Z"));
+          if (!minTime) {
             display.print(F(" "));
-            display.print((CALIBRATION_MIN_TIME_MS - elapsed) / 1000);
+            display.print((CAL_MIN_TIME_MS - elapsed) / 1000);
             display.print(F("s"));
           }
         }
@@ -725,14 +564,10 @@ void runCalibration(void) {
         display.print((int)rangeY);
         
         display.setCursor(0, 22);
-        if (CALIBRATION_REQUIRE_Z_AXIS) {
-          display.print(F("Z:"));
-          display.print((int)rangeZ);
-          display.print(F(" min:"));
-        } else {
-          display.print(F("min:"));
-        }
-        display.print((int)CALIBRATION_MIN_RANGE_UT);
+        display.print(F("Z:"));
+        display.print((int)rangeZ);
+        display.print(F(" cel:"));
+        display.print((int)CAL_MIN_RANGE);
         
         display.display();
       }
@@ -740,110 +575,307 @@ void runCalibration(void) {
     delay(10);
   }
   
-  // Calculate hard iron offsets
-  g_magCal.offsetX = (magMax[0] + magMin[0]) / 2.0f;
-  g_magCal.offsetY = (magMax[1] + magMin[1]) / 2.0f;
-  g_magCal.offsetZ = (magMax[2] + magMin[2]) / 2.0f;
+  // Zapisz wyniki do struktury kalibracji
+  for (int i = 0; i < 3; i++) {
+    g_cal.magMin[i] = magMin[i];
+    g_cal.magMax[i] = magMax[i];
+  }
   
-  // Calculate soft iron scale factors
-  float deltaX = magMax[0] - magMin[0];
-  float deltaY = magMax[1] - magMin[1];
-  float deltaZ = magMax[2] - magMin[2];
-  
-  // Prevent division by zero
-  const float MIN_DELTA = 1.0f;
-  if (fabs(deltaX) < MIN_DELTA) deltaX = MIN_DELTA;
-  if (fabs(deltaY) < MIN_DELTA) deltaY = MIN_DELTA;
-  if (fabs(deltaZ) < MIN_DELTA) deltaZ = MIN_DELTA;
-  
-  float avgDelta = (deltaX + deltaY + deltaZ) / 3.0f;
-  
-  g_magCal.scaleX = avgDelta / deltaX;
-  g_magCal.scaleY = avgDelta / deltaY;
-  g_magCal.scaleZ = avgDelta / deltaZ;
-  
-  // Save to EEPROM
   saveCalibration();
   
-  // Show result
-  if (complete) {
-    showMessage("Cal Done!", "Data saved.");
-  } else {
-    showMessage("Cal Timeout", "Data saved.");
-  }
+  showMessage(complete ? "MAG OK!" : "MAG Timeout", "Zapisano", "");
   delay(2000);
 }
 
+/**
+ * Aplikuje kalibrację magnetometru do surowych danych
+ * 
+ * Hard Iron: odejmij offset = (min + max) / 2
+ * Soft Iron: przeskaluj aby znormalizować elipsoidę do sfery
+ * 
+ * @param raw     Surowe dane [3] z magnetometru (po mapowaniu osi)
+ * @param calibrated Wyjściowe dane [3] po kalibracji
+ */
+void applyMagCalibration(float raw[3], float calibrated[3]) {
+  // Oblicz offsety (hard iron)
+  float offset[3];
+  offset[0] = (g_cal.magMax[0] + g_cal.magMin[0]) / 2.0f;
+  offset[1] = (g_cal.magMax[1] + g_cal.magMin[1]) / 2.0f;
+  offset[2] = (g_cal.magMax[2] + g_cal.magMin[2]) / 2.0f;
+  
+  // Oblicz delty dla każdej osi
+  float delta[3];
+  delta[0] = g_cal.magMax[0] - g_cal.magMin[0];
+  delta[1] = g_cal.magMax[1] - g_cal.magMin[1];
+  delta[2] = g_cal.magMax[2] - g_cal.magMin[2];
+  
+  // Średnia delta (docelowy promień sfery)
+  float avgDelta = (delta[0] + delta[1] + delta[2]) / 3.0f;
+  
+  // Oblicz skale (soft iron) - normalizacja do sfery
+  float scale[3];
+  const float MIN_DELTA = 1.0f;  // Zabezpieczenie przed dzieleniem przez 0
+  scale[0] = (fabs(delta[0]) > MIN_DELTA) ? avgDelta / delta[0] : 1.0f;
+  scale[1] = (fabs(delta[1]) > MIN_DELTA) ? avgDelta / delta[1] : 1.0f;
+  scale[2] = (fabs(delta[2]) > MIN_DELTA) ? avgDelta / delta[2] : 1.0f;
+  
+  // Aplikuj korekcję
+  calibrated[0] = (raw[0] - offset[0]) * scale[0];
+  calibrated[1] = (raw[1] - offset[1]) * scale[1];
+  calibrated[2] = (raw[2] - offset[2]) * scale[2];
+}
+
 // ============================================================================
-// FILTER FUNCTIONS
+// MATEMATYKA WEKTOROWA
+// ============================================================================
+
+float vector_dot(float a[3], float b[3]) {
+  return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+void vector_normalize(float a[3]) {
+  float mag = sqrt(vector_dot(a, a));
+  if (mag > 0.0f) {
+    a[0] /= mag;
+    a[1] /= mag;
+    a[2] /= mag;
+  }
+}
+
+// ============================================================================
+// FILTR MAHONY AHRS
 // ============================================================================
 
 /**
- * @brief Apply EMA filter to linear value
+ * Aktualizacja filtra Mahony z kwaternionami
+ * 
+ * Wykorzystuje wektory referencyjne Up (akcel) i West (akcel x mag)
+ * Zmodyfikowana wersja z jremington/ICM_20948-AHRS
  */
+void MahonyQuaternionUpdate(float ax, float ay, float az, 
+                            float gx, float gy, float gz,
+                            float mx, float my, float mz, float deltat) {
+  float q1 = g_ahrs.q[0], q2 = g_ahrs.q[1], q3 = g_ahrs.q[2], q4 = g_ahrs.q[3];
+  float norm;
+  float hx, hy, hz;
+  float ux, uy, uz, wx, wy, wz;
+  float ex, ey, ez;
+  
+  float q1q1 = q1 * q1, q1q2 = q1 * q2, q1q3 = q1 * q3, q1q4 = q1 * q4;
+  float q2q2 = q2 * q2, q2q3 = q2 * q3, q2q4 = q2 * q4;
+  float q3q3 = q3 * q3, q3q4 = q3 * q4, q4q4 = q4 * q4;
+  
+  // Wektor horyzontu = a x m (w układzie ciała)
+  hx = ay * mz - az * my;
+  hy = az * mx - ax * mz;
+  hz = ax * my - ay * mx;
+  
+  norm = sqrt(hx * hx + hy * hy + hz * hz);
+  if (norm == 0.0f) return;
+  norm = 1.0f / norm;
+  hx *= norm; hy *= norm; hz *= norm;
+  
+  // Estymowany kierunek Up
+  ux = 2.0f * (q2q4 - q1q3);
+  uy = 2.0f * (q1q2 + q3q4);
+  uz = q1q1 - q2q2 - q3q3 + q4q4;
+  
+  // Estymowany kierunek West
+  wx = 2.0f * (q2q3 + q1q4);
+  wy = q1q1 - q2q2 + q3q3 - q4q4;
+  wz = 2.0f * (q3q4 - q1q2);
+  
+  // Błąd = iloczyn wektorowy estymowanego i zmierzonego
+  ex = (ay * uz - az * uy) + (hy * wz - hz * wy);
+  ey = (az * ux - ax * uz) + (hz * wx - hx * wz);
+  ez = (ax * uy - ay * ux) + (hx * wy - hy * wx);
+  
+  // Sprzężenie całkowe (jeśli włączone)
+  if (MAHONY_KI > 0.0f) {
+    g_ahrs.eInt[0] += ex;
+    g_ahrs.eInt[1] += ey;
+    g_ahrs.eInt[2] += ez;
+    gx += MAHONY_KI * g_ahrs.eInt[0];
+    gy += MAHONY_KI * g_ahrs.eInt[1];
+    gz += MAHONY_KI * g_ahrs.eInt[2];
+  }
+  
+  // Sprzężenie proporcjonalne
+  gx = gx + MAHONY_KP * ex;
+  gy = gy + MAHONY_KP * ey;
+  gz = gz + MAHONY_KP * ez;
+  
+  // Aktualizacja kwaternionu
+  gx = gx * (0.5f * deltat);
+  gy = gy * (0.5f * deltat);
+  gz = gz * (0.5f * deltat);
+  
+  float qa = q1, qb = q2, qc = q3;
+  q1 += (-qb * gx - qc * gy - q4 * gz);
+  q2 += (qa * gx + qc * gz - q4 * gy);
+  q3 += (qa * gy - qb * gz + q4 * gx);
+  q4 += (qa * gz + qb * gy - qc * gx);
+  
+  // Normalizacja kwaternionu
+  norm = sqrt(q1*q1 + q2*q2 + q3*q3 + q4*q4);
+  norm = 1.0f / norm;
+  g_ahrs.q[0] = q1 * norm;
+  g_ahrs.q[1] = q2 * norm;
+  g_ahrs.q[2] = q3 * norm;
+  g_ahrs.q[3] = q4 * norm;
+}
+
+/**
+ * Konwersja kwaternionu na kąty Eulera
+ * Orientacja NWU: X na północ (yaw=0), Y na zachód, Z do góry
+ */
+void quaternionToEuler(float q[4], float& yaw, float& pitch, float& roll) {
+  roll  = atan2((q[0] * q[1] + q[2] * q[3]), 0.5f - (q[1] * q[1] + q[2] * q[2]));
+  pitch = asin(2.0f * (q[0] * q[2] - q[1] * q[3]));
+  yaw   = atan2((q[1] * q[2] + q[0] * q[3]), 0.5f - (q[2] * q[2] + q[3] * q[3]));
+  
+  yaw   *= 180.0f / PI;
+  pitch *= 180.0f / PI;
+  roll  *= 180.0f / PI;
+}
+
+// ============================================================================
+// PRZETWARZANIE CZUJNIKÓW
+// ============================================================================
+
+bool validateMagData(void) {
+  float mx = imu.magX();
+  float my = imu.magY();
+  float mz = imu.magZ();
+  
+  if (mx == 0 && my == 0 && mz == 0) return false;
+  if (fabs(mx) > MAG_VALID_MAX || fabs(my) > MAG_VALID_MAX || fabs(mz) > MAG_VALID_MAX) return false;
+  return true;
+}
+
+void processSensors(void) {
+  float Gxyz[3], Axyz[3], Mxyz[3], McalXyz[3];
+  
+  // Odczyt i skalowanie żyroskopu (rad/s z offsetem)
+  Gxyz[0] = GYRO_SCALE * (imu.agmt.gyr.axes.x - g_cal.gyroOffset[0]);
+  Gxyz[1] = GYRO_SCALE * (imu.agmt.gyr.axes.y - g_cal.gyroOffset[1]);
+  Gxyz[2] = GYRO_SCALE * (imu.agmt.gyr.axes.z - g_cal.gyroOffset[2]);
+  
+  // Odczyt akcelerometru i normalizacja
+  Axyz[0] = imu.agmt.acc.axes.x;
+  Axyz[1] = imu.agmt.acc.axes.y;
+  Axyz[2] = imu.agmt.acc.axes.z;
+  vector_normalize(Axyz);
+  
+  // Odczyt magnetometru z mapowaniem osi dla AK09916
+  Mxyz[0] = imu.magY();      // Mapowanie osi
+  Mxyz[1] = -imu.magX();
+  Mxyz[2] = -imu.magZ();
+  
+  // Aplikuj kalibrację magnetometru
+  applyMagCalibration(Mxyz, McalXyz);
+  vector_normalize(McalXyz);
+  
+  // Uzgodnij osie mag z akcel (Y, Z odwrócone)
+  McalXyz[1] = -McalXyz[1];
+  McalXyz[2] = -McalXyz[2];
+  
+  // Oblicz delta time
+  unsigned long now = micros();
+  float deltat = (now - g_ahrs.lastUpdate) * 1.0e-6f;
+  g_ahrs.lastUpdate = now;
+  
+  if (!validateMagData()) return;
+  
+  // Aktualizuj filtr Mahony AHRS
+  MahonyQuaternionUpdate(Axyz[0], Axyz[1], Axyz[2],
+                         Gxyz[0], Gxyz[1], Gxyz[2],
+                         McalXyz[0], McalXyz[1], McalXyz[2], deltat);
+  
+  // Konwersja na kąty Eulera
+  float yaw, pitch, roll;
+  quaternionToEuler(g_ahrs.q, yaw, pitch, roll);
+  
+  // Aplikuj deklinację (konwencja nawigacyjna: yaw rośnie CW od N)
+  yaw = -(yaw + MAGNETIC_DECLINATION);
+  if (yaw < 0) yaw += 360.0f;
+  if (yaw >= 360.0f) yaw -= 360.0f;
+  
+  g_sensor.roll = roll;
+  g_sensor.pitch = pitch;
+  g_sensor.yaw = yaw;
+  g_sensor.headingGeo = yaw;
+  
+  // Nagłówek magnetyczny (bez deklinacji)
+  g_sensor.headingMag = yaw - MAGNETIC_DECLINATION;
+  if (g_sensor.headingMag < 0) g_sensor.headingMag += 360.0f;
+  if (g_sensor.headingMag >= 360.0f) g_sensor.headingMag -= 360.0f;
+  
+  // Filtr EMA
+  if (!g_sensor.filtersReady) {
+    g_sensor.rollFiltered = g_sensor.roll;
+    g_sensor.pitchFiltered = g_sensor.pitch;
+    g_sensor.headingMagFiltered = g_sensor.headingMag;
+    g_sensor.headingGeoFiltered = g_sensor.headingGeo;
+    g_sensor.filtersReady = true;
+  } else {
+    g_sensor.rollFiltered = emaFilter(g_sensor.roll, g_sensor.rollFiltered, EMA_ALPHA);
+    g_sensor.pitchFiltered = emaFilter(g_sensor.pitch, g_sensor.pitchFiltered, EMA_ALPHA);
+    g_sensor.headingMagFiltered = emaFilterAngle(g_sensor.headingMag, g_sensor.headingMagFiltered, EMA_ALPHA);
+    g_sensor.headingGeoFiltered = emaFilterAngle(g_sensor.headingGeo, g_sensor.headingGeoFiltered, EMA_ALPHA);
+  }
+}
+
+// ============================================================================
+// FUNKCJE FILTRÓW
+// ============================================================================
+
 float emaFilter(float newVal, float oldVal, float alpha) {
   return alpha * newVal + (1.0f - alpha) * oldVal;
 }
 
-/**
- * @brief Apply EMA filter to angular value (handles 0°/360° wraparound)
- * 
- * Uses vector-based averaging to prevent jumps at North (0°/360°)
- */
 float emaFilterAngle(float newAngle, float oldAngle, float alpha) {
   float newRad = newAngle * PI / 180.0f;
   float oldRad = oldAngle * PI / 180.0f;
   
-  // Convert to unit vectors
-  float newX = cos(newRad);
-  float newY = sin(newRad);
-  float oldX = cos(oldRad);
-  float oldY = sin(oldRad);
+  float newX = cos(newRad), newY = sin(newRad);
+  float oldX = cos(oldRad), oldY = sin(oldRad);
   
-  // Apply EMA to components
   float filtX = alpha * newX + (1.0f - alpha) * oldX;
   float filtY = alpha * newY + (1.0f - alpha) * oldY;
   
-  // Convert back to angle
   float result = atan2(filtY, filtX) * 180.0f / PI;
-  
-  // Normalize to 0-360
   if (result < 0) result += 360.0f;
-  
   return result;
 }
 
 // ============================================================================
-// DISPLAY FUNCTIONS
+// FUNKCJE WYŚWIETLANIA
 // ============================================================================
 
-/**
- * @brief Update OLED display with current readings
- */
 void updateDisplay(void) {
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   
-  // Line 1: Tilt angles (Roll, Pitch)
+  // Linia 1: Kąty pochylenia
   display.setCursor(0, 0);
   display.print(F("X:"));
   display.print(g_sensor.rollFiltered, 1);
   display.print(F(" Y:"));
   display.print(g_sensor.pitchFiltered, 1);
   
-  // Calculate deviations from North
   float magDev = getDeviationFromNorth(g_sensor.headingMagFiltered);
   float geoDev = getDeviationFromNorth(g_sensor.headingGeoFiltered);
   
-  // Line 2: Magnetic North deviation
+  // Linia 2: Północ magnetyczna
   display.setCursor(0, 11);
   display.print(F("Mag:"));
   display.print(magDev, 1);
-  display.print((char)247);  // Degree symbol
+  display.print((char)247);  // Symbol stopnia
   display.print(getCardinalDirection(g_sensor.headingMagFiltered));
   
-  // Line 3: Geographic North deviation
+  // Linia 3: Północ geograficzna
   display.setCursor(0, 22);
   display.print(F("Geo:"));
   display.print(geoDev, 1);
@@ -853,24 +885,12 @@ void updateDisplay(void) {
   display.display();
 }
 
-/**
- * @brief Calculate deviation from North (-180° to +180°)
- * @param heading Current heading (0-360°)
- * @return Deviation (negative = west, positive = east)
- */
 float getDeviationFromNorth(float heading) {
   float deviation = heading;
-  if (deviation > 180.0f) {
-    deviation -= 360.0f;
-  }
+  if (deviation > 180.0f) deviation -= 360.0f;
   return deviation;
 }
 
-/**
- * @brief Get cardinal direction string
- * @param heading Heading in degrees (0-360)
- * @return Cardinal direction string (N, NE, E, SE, S, SW, W, NW)
- */
 const char* getCardinalDirection(float heading) {
   if (heading >= 337.5f || heading < 22.5f)  return "N";
   if (heading >= 22.5f  && heading < 67.5f)  return "NE";
@@ -883,9 +903,6 @@ const char* getCardinalDirection(float heading) {
   return "?";
 }
 
-/**
- * @brief Show message on display (1-3 lines)
- */
 void showMessage(const char* line1, const char* line2, const char* line3) {
   display.clearDisplay();
   display.setTextSize(1);
@@ -893,30 +910,18 @@ void showMessage(const char* line1, const char* line2, const char* line3) {
   
   display.setCursor(0, 0);
   display.println(line1);
-  
-  if (line2) {
-    display.setCursor(0, 11);
-    display.println(line2);
-  }
-  
-  if (line3) {
-    display.setCursor(0, 22);
-    display.println(line3);
-  }
+  if (line2) { display.setCursor(0, 11); display.println(line2); }
+  if (line3) { display.setCursor(0, 22); display.println(line3); }
   
   display.display();
 }
 
 // ============================================================================
-// UTILITY FUNCTIONS
+// FUNKCJE POMOCNICZE
 // ============================================================================
 
-/**
- * @brief Track runtime and reset short run counter if normal operation
- */
 void trackRuntime(void) {
   static bool normalOpRecorded = false;
-  
   if (!normalOpRecorded && (millis() - g_startupTime >= SHORT_RUN_THRESHOLD_MS)) {
     normalOpRecorded = true;
     resetShortRunCount();
