@@ -635,7 +635,7 @@ float vector_dot(float a[3], float b[3]) {
 
 void vector_normalize(float a[3]) {
   float mag = sqrt(vector_dot(a, a));
-  if (mag > 0.0f) {
+  if (mag > 1e-9f) {  // Epsilon dla precyzji float
     a[0] /= mag;
     a[1] /= mag;
     a[2] /= mag;
@@ -671,7 +671,7 @@ void MahonyQuaternionUpdate(float ax, float ay, float az,
   hz = ax * my - ay * mx;
   
   norm = sqrt(hx * hx + hy * hy + hz * hz);
-  if (norm == 0.0f) return;
+  if (norm < 1e-9f) return;  // Epsilon dla precyzji float
   norm = 1.0f / norm;
   hx *= norm; hy *= norm; hz *= norm;
   
