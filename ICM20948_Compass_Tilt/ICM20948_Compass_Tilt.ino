@@ -31,7 +31,7 @@
 // --- Location (Zywiec, Poland) ---
 #define MAGNETIC_DECLINATION  5.5f    // Declination (E = positive)
 
-// --- Parametry filtra Mahony AHRS ---
+// --- Mahony AHRS filter parameters ---
 #define MAHONY_KP             50.0f
 #define MAHONY_KI             0.0f
 
@@ -60,9 +60,9 @@
 #define EEPROM_MAGIC_ADDR         0
 #define EEPROM_SHORT_RUNS_ADDR    4
 #define EEPROM_CAL_VALID_ADDR     8
-#define EEPROM_GYRO_OFF_ADDR      12    // 3 floaty = 12 bajtów
-#define EEPROM_MAG_MIN_ADDR       24    // 3 floaty = 12 bajtów  
-#define EEPROM_MAG_MAX_ADDR       36    // 3 floaty = 12 bajtów
+#define EEPROM_GYRO_OFF_ADDR      12    // 3 floats = 12 bytes
+#define EEPROM_MAG_MIN_ADDR       24    // 3 floats = 12 bytes  
+#define EEPROM_MAG_MAX_ADDR       36    // 3 floats = 12 bytes
 #define EEPROM_CRC_ADDR           48
 #define EEPROM_MAGIC_VALUE        0xCAFE
 
