@@ -1,39 +1,10 @@
 /**
  * @file ICM20948_Compass_Tilt.ino
- * @brief Kompas i inklinometr z Mahony AHRS i wbudowaną kalibracją
+ * @brief Compass and inclinometer with Mahony AHRS and built-in calibration
  * 
- * Bazuje na projekcie jremington/ICM_20948-AHRS oraz dokumentacji
- * thecavepearlproject.org dotyczącej kalibracji magnetometru.
- * 
- * Sprzęt:
- *   - Arduino Pro Mini (3.3V/8MHz lub 5V/16MHz)
- *   - ICM-20948 9-DOF IMU (z magnetometrem AK09916)
- *   - OLED 128x32 I2C (SSD1306)
- * 
- * Funkcje:
- *   - Filtr Mahony AHRS oparty na kwaternionach
- *   - Integracja żyroskopu dla dynamicznej odpowiedzi
- *   - Wbudowana automatyczna kalibracja (bez zewnętrznych skryptów)
- *   - Korekcja Hard Iron (offset min/max)
- *   - Korekcja Soft Iron (skalowanie osi)
- *   - Menu OLED do uruchamiania kalibracji
- *   - Pomiar pochylenia (Roll, Pitch) z dokładnością 0.1°
- *   - Wskazanie północy magnetycznej i geograficznej
- *   - Filtrowanie EMA
- *   - Zapis kalibracji w EEPROM z CRC8
- * 
- * Kalibracja:
- *   - 3x krótkie uruchomienia (<2s) = tryb kalibracji
- *   - Lub przytrzymaj podczas startu
- *   - Obracaj czujnik we wszystkich kierunkach
- *   - Automatyczne wykrywanie zakończenia
- * 
- * Lokalizacja: Żywiec, Polska (49.6853°N, 19.1925°E)
- * Deklinacja magnetyczna: 5.5° E (2024)
- * 
- * Kalibracja wg: https://thecavepearlproject.org/2015/05/22/calibrating-any-compass-or-accelerometer-for-arduino/
- * Referencja: https://github.com/jremington/ICM_20948-AHRS
- * 
+ * Hardware: Arduino Pro Mini, ICM-20948 IMU, OLED 128x32
+ * Based on: jremington/ICM_20948-AHRS, Cave Pearl Project
+ * Location: Zywiec, Poland (49.6853N, 19.1925E), Declination: 5.5E
  * @license MIT
  */
 
@@ -44,10 +15,10 @@
 #include "ICM_20948.h"
 
 // ============================================================================
-// KONFIGURACJA
+// CONFIGURATION
 // ============================================================================
 
-// --- Wyświetlacz OLED ---
+// --- OLED Display ---
 #define SCREEN_WIDTH      128
 #define SCREEN_HEIGHT     32
 #define OLED_RESET        -1
@@ -57,53 +28,53 @@
 #define ICM_AD0_VAL       1
 #define ICM_I2C_SPEED     400000
 
-// --- Lokalizacja (Żywiec, Polska) ---
-#define MAGNETIC_DECLINATION  5.5f    // Deklinacja (E = dodatnia)
+// --- Location (Zywiec, Poland) ---
+#define MAGNETIC_DECLINATION  5.5f    // Declination (E = positive)
 
-// --- Parametry filtra Mahony AHRS ---
+// --- Mahony AHRS filter parameters ---
 #define MAHONY_KP             50.0f
 #define MAHONY_KI             0.0f
 
-// --- Żyroskop ---
+// --- Gyroscope ---
 #define GYRO_SCALE            ((M_PI / 180.0f) * 0.00763f)
 
-// --- Auto-kalibracja ---
+// --- Auto-calibration ---
 #define SHORT_RUN_THRESHOLD_MS    2000
 #define SHORT_RUNS_TO_CALIBRATE   3
 #define GYRO_CAL_SAMPLES          500
 
-// --- Parametry kalibracji magnetometru ---
-#define CAL_MIN_TIME_MS       5000     // Min czas kalibracji
-#define CAL_MAX_TIME_MS       60000    // Max czas kalibracji
-#define CAL_MIN_RANGE         100.0f   // Min zakres na oś (μT)
-#define CAL_CHECK_INTERVAL_MS 500      // Interwał sprawdzania
+// --- Mag calibration params ---
+#define CAL_MIN_TIME_MS       5000
+#define CAL_MAX_TIME_MS       60000
+#define CAL_MIN_RANGE         100.0f
+#define CAL_CHECK_INTERVAL_MS 500
 
-// --- Filtry ---
+// --- Filters ---
 #define EMA_ALPHA             0.10f
 #define DISPLAY_UPDATE_MS     250
 
-// --- Walidacja magnetometru ---
+// --- Mag validation ---
 #define MAG_VALID_MAX         5000.0f
 
-// --- Mapa pamięci EEPROM ---
+// --- EEPROM map ---
 #define EEPROM_MAGIC_ADDR         0
 #define EEPROM_SHORT_RUNS_ADDR    4
 #define EEPROM_CAL_VALID_ADDR     8
-#define EEPROM_GYRO_OFF_ADDR      12    // 3 floaty = 12 bajtów
-#define EEPROM_MAG_MIN_ADDR       24    // 3 floaty = 12 bajtów  
-#define EEPROM_MAG_MAX_ADDR       36    // 3 floaty = 12 bajtów
+#define EEPROM_GYRO_OFF_ADDR      12    // 3 floats = 12 bytes
+#define EEPROM_MAG_MIN_ADDR       24    // 3 floats = 12 bytes  
+#define EEPROM_MAG_MAX_ADDR       36    // 3 floats = 12 bytes
 #define EEPROM_CRC_ADDR           48
 #define EEPROM_MAGIC_VALUE        0xCAFE
 
 // ============================================================================
-// OBIEKTY GLOBALNE
+// GLOBAL OBJECTS
 // ============================================================================
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 ICM_20948_I2C    imu;
 
 // ============================================================================
-// STRUKTURY DANYCH
+// DATA STRUCTURES
 // ============================================================================
 
 struct SensorData {
@@ -115,25 +86,23 @@ struct SensorData {
 };
 
 /**
- * Struktura kalibracji wg Cave Pearl Project:
- * - Hard Iron: offset = (min + max) / 2 dla każdej osi
- * - Soft Iron: scale = średnia_delta / delta_osi (normalizacja do sfery)
+ * Calibration struct (Cave Pearl Project method)
  */
 struct Calibration {
-  float gyroOffset[3];    // Offsety żyroskopu
-  float magMin[3];        // Minimalne wartości magnetometru
-  float magMax[3];        // Maksymalne wartości magnetometru
+  float gyroOffset[3];
+  float magMin[3];
+  float magMax[3];
   bool isValid;
 };
 
 struct AHRSState {
-  float q[4];             // Kwaternion [w, x, y, z]
-  float eInt[3];          // Błąd całkowy
+  float q[4];
+  float eInt[3];
   unsigned long lastUpdate;
 };
 
 // ============================================================================
-// ZMIENNE GLOBALNE
+// GLOBAL VARIABLES
 // ============================================================================
 
 SensorData    g_sensor = {0};
@@ -143,7 +112,7 @@ unsigned long g_startupTime = 0;
 unsigned long g_lastDisplayUpdate = 0;
 
 // ============================================================================
-// PROTOTYPY FUNKCJI
+// PROTOTYPES
 // ============================================================================
 
 void initDisplay(void);
@@ -176,9 +145,8 @@ float emaFilterAngle(float newAngle, float oldAngle, float alpha);
 
 void updateDisplay(void);
 float getDeviationFromNorth(float heading);
-const char* getCardinalDirection(float heading);
-void showMessage(const char* line1, const char* line2 = nullptr, const char* line3 = nullptr);
-void showCalibrationHelp(void);
+char getCardinalChar(float heading);
+void showMsg(const char* l1, const char* l2 = nullptr, const char* l3 = nullptr);
 void trackRuntime(void);
 
 // ============================================================================
@@ -192,10 +160,10 @@ void setup() {
   Wire.setClock(ICM_I2C_SPEED);
   
   initDisplay();
-  showMessage("Inicjalizacja...");
+  showMsg("Init...");
   
   if (!initIMU()) {
-    showMessage("Blad IMU!", "Sprawdz polaczenia");
+    showMsg("IMU Err!", "Check conn");
     while (true) delay(100);
   }
   
@@ -204,33 +172,33 @@ void setup() {
   incrementShortRunCount();
   loadCalibration();
   
-  // Sprawdź czy uruchomić kalibrację
+  // Check if calibration needed
   if (shouldTriggerCalibration()) {
-    showCalibrationHelp();
+    showMsg("=CALIBRATION=", "1.Hold still", "2.Rotate slow");
     delay(3000);
     runGyroCalibration();
     runMagCalibration();
-    showMessage("Kalibracja", "zakonczona!", "Restart...");
+    showMsg("Cal done!", "Restart...");
     while (true) delay(100);
   }
   
-  // Jeśli brak kalibracji, wykonaj tylko gyro
+  // If no calibration, do gyro only
   if (!g_cal.isValid) {
-    showMessage("Brak kalibracji", "Gyro cal...", "Trzymaj nieruchomo");
+    showMsg("No cal", "Gyro cal...", "Hold still");
     delay(1000);
     runGyroCalibration();
-    showMessage("Uzyj 3x restart", "dla pelnej", "kalibracji");
+    showMsg("3x restart", "for full cal");
     delay(3000);
   }
   
   g_ahrs.lastUpdate = micros();
   
-  showMessage("ICM-20948 Ready", "Mahony AHRS", "Zywiec, PL");
-  delay(2000);
+  showMsg("ICM20948 OK", "Mahony AHRS");
+  delay(1500);
 }
 
 // ============================================================================
-// GŁÓWNA PĘTLA
+// MAIN LOOP
 // ============================================================================
 
 void loop() {
@@ -248,7 +216,7 @@ void loop() {
 }
 
 // ============================================================================
-// INICJALIZACJA
+// INITIALIZATION
 // ============================================================================
 
 void initDisplay(void) {
@@ -302,7 +270,7 @@ void configureIMU(void) {
 }
 
 // ============================================================================
-// FUNKCJE EEPROM
+// EEPROM FUNCTIONS
 // ============================================================================
 
 static uint8_t crc8UpdateByte(uint8_t crc, uint8_t data) {
@@ -366,14 +334,14 @@ void loadCalibration(void) {
     if (storedCRC == calculateCRC8()) {
       g_cal.isValid = true;
     } else {
-      // Reset do domyślnych
+      // Reset to defaults
       for (int i = 0; i < 3; i++) {
         g_cal.gyroOffset[i] = 0;
         g_cal.magMin[i] = -200;
         g_cal.magMax[i] = 200;
       }
       g_cal.isValid = false;
-      showMessage("Blad CRC!", "Rekalibracja");
+      showMsg("CRC Err!", "Recal");
       delay(2000);
     }
   }
@@ -423,29 +391,15 @@ void resetShortRunCount(void) {
 }
 
 // ============================================================================
-// KALIBRACJA
+// CALIBRATION
 // ============================================================================
 
 /**
- * Wyświetla instrukcję kalibracji na OLED
- */
-void showCalibrationHelp(void) {
-  display.clearDisplay();
-  display.setCursor(0, 0);
-  display.println(F("=== KALIBRACJA ==="));
-  display.println(F("1. Trzymaj nieruch."));
-  display.println(F("2. Obracaj powoli"));
-  display.println(F("3. Czekaj na OK"));
-  display.display();
-}
-
-/**
- * Kalibracja żyroskopu - uśrednianie offsetów
- * Czujnik musi być nieruchomy podczas kalibracji
+ * Gyroscope calibration - averaging offsets
  */
 void runGyroCalibration(void) {
-  showMessage("Kalibracja GYRO", "Trzymaj", "nieruchomo!");
-  delay(2000);
+  showMsg("GYRO Cal", "Hold still!");
+  delay(1500);
   
   long gyroSum[3] = {0, 0, 0};
   int count = 0;
@@ -460,15 +414,13 @@ void runGyroCalibration(void) {
     }
     delay(5);
     
-    // Aktualizuj wyświetlacz co 50 próbek
-    if (i % 50 == 0) {
+    // Update display every 100 samples
+    if (i % 100 == 0) {
       display.clearDisplay();
       display.setCursor(0, 0);
-      display.println(F("Kalibracja GYRO"));
-      display.print(F("Postep: "));
+      display.print(F("GYRO "));
       display.print((i * 100) / GYRO_CAL_SAMPLES);
       display.println(F("%"));
-      display.println(F("Nie ruszaj!"));
       display.display();
     }
   }
@@ -479,25 +431,18 @@ void runGyroCalibration(void) {
     g_cal.gyroOffset[2] = (float)gyroSum[2] / count;
   }
   
-  showMessage("GYRO OK!", "", "");
-  delay(1000);
+  showMsg("GYRO OK!");
+  delay(800);
 }
 
 /**
- * Kalibracja magnetometru metodą min/max
- * 
- * Zgodnie z Cave Pearl Project:
- * - Hard Iron offset = (min + max) / 2 dla każdej osi
- * - Soft Iron scale = średnia_delta / delta_osi
- * 
- * Ta metoda wymaga minimalnej ilości RAM - tylko 6 floatów (min/max)
- * zamiast setek próbek potrzebnych do ellipsoid fitting.
+ * Magnetometer calibration using min/max method
  */
 void runMagCalibration(void) {
-  showMessage("Kalibracja MAG", "Obracaj powoli", "we wszystkich");
-  delay(2000);
+  showMsg("MAG Cal", "Rotate slowly");
+  delay(1500);
   
-  // Inicjalizuj min/max
+  // Initialize min/max
   float magMin[3] = {32767.0f, 32767.0f, 32767.0f};
   float magMax[3] = {-32767.0f, -32767.0f, -32767.0f};
   
@@ -509,12 +454,12 @@ void runMagCalibration(void) {
     if (imu.dataReady()) {
       imu.getAGMT();
       
-      // Mapowanie osi dla AK09916 (zgodne z akcelerometrem)
+      // Axis mapping for AK09916
       float mx = imu.magY();
       float my = -imu.magX();
       float mz = -imu.magZ();
       
-      // Aktualizuj min/max dla każdej osi
+      // Update min/max
       if (mx < magMin[0]) magMin[0] = mx;
       if (mx > magMax[0]) magMax[0] = mx;
       if (my < magMin[1]) magMin[1] = my;
@@ -522,60 +467,41 @@ void runMagCalibration(void) {
       if (mz < magMin[2]) magMin[2] = mz;
       if (mz > magMax[2]) magMax[2] = mz;
       
-      // Sprawdzaj postęp co CAL_CHECK_INTERVAL_MS
+      // Check progress
       if (millis() - lastCheck >= CAL_CHECK_INTERVAL_MS) {
         lastCheck = millis();
         
         float rangeX = magMax[0] - magMin[0];
         float rangeY = magMax[1] - magMin[1];
-        float rangeZ = magMax[2] - magMin[2];
         unsigned long elapsed = millis() - startTime;
         
         bool xOk = (rangeX >= CAL_MIN_RANGE);
         bool yOk = (rangeY >= CAL_MIN_RANGE);
-        bool zOk = (rangeZ >= CAL_MIN_RANGE);
         bool minTime = (elapsed >= CAL_MIN_TIME_MS);
         
-        // Wymagamy X, Y i minimalnego czasu; Z opcjonalne
         if (xOk && yOk && minTime) complete = true;
         
-        // Wyświetl status na OLED
+        // Show compact status
         display.clearDisplay();
         display.setCursor(0, 0);
-        
-        if (complete) {
-          display.println(F("KALIBRACJA OK!"));
-        } else {
-          display.print(F("KAL: "));
-          display.print(xOk ? F("+") : F("X"));
-          display.print(yOk ? F("+") : F("Y"));
-          display.print(zOk ? F("+") : F("Z"));
-          if (!minTime) {
-            display.print(F(" "));
-            display.print((CAL_MIN_TIME_MS - elapsed) / 1000);
-            display.print(F("s"));
-          }
+        display.print(xOk ? F("+") : F("X"));
+        display.print(yOk ? F("+") : F("Y"));
+        if (!minTime) {
+          display.print(F(" "));
+          display.print((CAL_MIN_TIME_MS - elapsed) / 1000);
+          display.print(F("s"));
         }
-        
         display.setCursor(0, 11);
-        display.print(F("X:"));
         display.print((int)rangeX);
-        display.print(F(" Y:"));
+        display.print(F("/"));
         display.print((int)rangeY);
-        
-        display.setCursor(0, 22);
-        display.print(F("Z:"));
-        display.print((int)rangeZ);
-        display.print(F(" cel:"));
-        display.print((int)CAL_MIN_RANGE);
-        
         display.display();
       }
     }
     delay(10);
   }
   
-  // Zapisz wyniki do struktury kalibracji
+  // Save results
   for (int i = 0; i < 3; i++) {
     g_cal.magMin[i] = magMin[i];
     g_cal.magMax[i] = magMax[i];
@@ -583,50 +509,31 @@ void runMagCalibration(void) {
   
   saveCalibration();
   
-  showMessage(complete ? "MAG OK!" : "MAG Timeout", "Zapisano", "");
-  delay(2000);
+  showMsg(complete ? "MAG OK!" : "MAG Timeout", "Saved");
+  delay(1500);
 }
 
 /**
- * Aplikuje kalibrację magnetometru do surowych danych
- * 
- * Hard Iron: odejmij offset = (min + max) / 2
- * Soft Iron: przeskaluj aby znormalizować elipsoidę do sfery
- * 
- * @param raw     Surowe dane [3] z magnetometru (po mapowaniu osi)
- * @param calibrated Wyjściowe dane [3] po kalibracji
+ * Apply magnetometer calibration (Hard/Soft Iron correction)
  */
 void applyMagCalibration(float raw[3], float calibrated[3]) {
-  // Oblicz offsety (hard iron)
-  float offset[3];
-  offset[0] = (g_cal.magMax[0] + g_cal.magMin[0]) / 2.0f;
-  offset[1] = (g_cal.magMax[1] + g_cal.magMin[1]) / 2.0f;
-  offset[2] = (g_cal.magMax[2] + g_cal.magMin[2]) / 2.0f;
+  float offset[3], delta[3], scale[3];
   
-  // Oblicz delty dla każdej osi
-  float delta[3];
-  delta[0] = g_cal.magMax[0] - g_cal.magMin[0];
-  delta[1] = g_cal.magMax[1] - g_cal.magMin[1];
-  delta[2] = g_cal.magMax[2] - g_cal.magMin[2];
+  for (int i = 0; i < 3; i++) {
+    offset[i] = (g_cal.magMax[i] + g_cal.magMin[i]) * 0.5f;
+    delta[i] = g_cal.magMax[i] - g_cal.magMin[i];
+  }
   
-  // Średnia delta (docelowy promień sfery)
   float avgDelta = (delta[0] + delta[1] + delta[2]) / 3.0f;
   
-  // Oblicz skale (soft iron) - normalizacja do sfery
-  float scale[3];
-  const float MIN_DELTA = 1.0f;  // Zabezpieczenie przed dzieleniem przez 0
-  scale[0] = (fabs(delta[0]) > MIN_DELTA) ? avgDelta / delta[0] : 1.0f;
-  scale[1] = (fabs(delta[1]) > MIN_DELTA) ? avgDelta / delta[1] : 1.0f;
-  scale[2] = (fabs(delta[2]) > MIN_DELTA) ? avgDelta / delta[2] : 1.0f;
-  
-  // Aplikuj korekcję
-  calibrated[0] = (raw[0] - offset[0]) * scale[0];
-  calibrated[1] = (raw[1] - offset[1]) * scale[1];
-  calibrated[2] = (raw[2] - offset[2]) * scale[2];
+  for (int i = 0; i < 3; i++) {
+    scale[i] = (delta[i] > 1.0f) ? avgDelta / delta[i] : 1.0f;
+    calibrated[i] = (raw[i] - offset[i]) * scale[i];
+  }
 }
 
 // ============================================================================
-// MATEMATYKA WEKTOROWA
+// VECTOR MATH
 // ============================================================================
 
 float vector_dot(float a[3], float b[3]) {
@@ -635,7 +542,7 @@ float vector_dot(float a[3], float b[3]) {
 
 void vector_normalize(float a[3]) {
   float mag = sqrt(vector_dot(a, a));
-  if (mag > 1e-9f) {  // Epsilon dla precyzji float
+  if (mag > 1e-9f) {
     a[0] /= mag;
     a[1] /= mag;
     a[2] /= mag;
@@ -643,14 +550,11 @@ void vector_normalize(float a[3]) {
 }
 
 // ============================================================================
-// FILTR MAHONY AHRS
+// MAHONY AHRS
 // ============================================================================
 
 /**
- * Aktualizacja filtra Mahony z kwaternionami
- * 
- * Wykorzystuje wektory referencyjne Up (akcel) i West (akcel x mag)
- * Zmodyfikowana wersja z jremington/ICM_20948-AHRS
+ * Mahony quaternion update with Up and West reference vectors
  */
 void MahonyQuaternionUpdate(float ax, float ay, float az, 
                             float gx, float gy, float gz,
@@ -665,32 +569,32 @@ void MahonyQuaternionUpdate(float ax, float ay, float az,
   float q2q2 = q2 * q2, q2q3 = q2 * q3, q2q4 = q2 * q4;
   float q3q3 = q3 * q3, q3q4 = q3 * q4, q4q4 = q4 * q4;
   
-  // Wektor horyzontu = a x m (w układzie ciała)
+  // Horizon vector = a x m (body frame)
   hx = ay * mz - az * my;
   hy = az * mx - ax * mz;
   hz = ax * my - ay * mx;
   
   norm = sqrt(hx * hx + hy * hy + hz * hz);
-  if (norm < 1e-9f) return;  // Epsilon dla precyzji float
+  if (norm < 1e-9f) return;
   norm = 1.0f / norm;
   hx *= norm; hy *= norm; hz *= norm;
   
-  // Estymowany kierunek Up
+  // Estimated Up direction
   ux = 2.0f * (q2q4 - q1q3);
   uy = 2.0f * (q1q2 + q3q4);
   uz = q1q1 - q2q2 - q3q3 + q4q4;
   
-  // Estymowany kierunek West
+  // Estimated West direction
   wx = 2.0f * (q2q3 + q1q4);
   wy = q1q1 - q2q2 + q3q3 - q4q4;
   wz = 2.0f * (q3q4 - q1q2);
   
-  // Błąd = iloczyn wektorowy estymowanego i zmierzonego
+  // Error = cross product of estimated and measured
   ex = (ay * uz - az * uy) + (hy * wz - hz * wy);
   ey = (az * ux - ax * uz) + (hz * wx - hx * wz);
   ez = (ax * uy - ay * ux) + (hx * wy - hy * wx);
   
-  // Sprzężenie całkowe (jeśli włączone)
+  // Integral feedback
   if (MAHONY_KI > 0.0f) {
     g_ahrs.eInt[0] += ex;
     g_ahrs.eInt[1] += ey;
@@ -700,12 +604,12 @@ void MahonyQuaternionUpdate(float ax, float ay, float az,
     gz += MAHONY_KI * g_ahrs.eInt[2];
   }
   
-  // Sprzężenie proporcjonalne
+  // Proportional feedback
   gx = gx + MAHONY_KP * ex;
   gy = gy + MAHONY_KP * ey;
   gz = gz + MAHONY_KP * ez;
   
-  // Aktualizacja kwaternionu
+  // Quaternion update
   gx = gx * (0.5f * deltat);
   gy = gy * (0.5f * deltat);
   gz = gz * (0.5f * deltat);
@@ -716,7 +620,7 @@ void MahonyQuaternionUpdate(float ax, float ay, float az,
   q3 += (qa * gy - qb * gz + q4 * gx);
   q4 += (qa * gz + qb * gy - qc * gx);
   
-  // Normalizacja kwaternionu
+  // Quaternion normalization
   norm = sqrt(q1*q1 + q2*q2 + q3*q3 + q4*q4);
   norm = 1.0f / norm;
   g_ahrs.q[0] = q1 * norm;
@@ -726,8 +630,7 @@ void MahonyQuaternionUpdate(float ax, float ay, float az,
 }
 
 /**
- * Konwersja kwaternionu na kąty Eulera
- * Orientacja NWU: X na północ (yaw=0), Y na zachód, Z do góry
+ * Quaternion to Euler angles (NWU orientation)
  */
 void quaternionToEuler(float q[4], float& yaw, float& pitch, float& roll) {
   roll  = atan2((q[0] * q[1] + q[2] * q[3]), 0.5f - (q[1] * q[1] + q[2] * q[2]));
@@ -740,7 +643,7 @@ void quaternionToEuler(float q[4], float& yaw, float& pitch, float& roll) {
 }
 
 // ============================================================================
-// PRZETWARZANIE CZUJNIKÓW
+// SENSOR PROCESSING
 // ============================================================================
 
 bool validateMagData(void) {
@@ -756,47 +659,47 @@ bool validateMagData(void) {
 void processSensors(void) {
   float Gxyz[3], Axyz[3], Mxyz[3], McalXyz[3];
   
-  // Odczyt i skalowanie żyroskopu (rad/s z offsetem)
+  // Read gyroscope (rad/s with offset)
   Gxyz[0] = GYRO_SCALE * (imu.agmt.gyr.axes.x - g_cal.gyroOffset[0]);
   Gxyz[1] = GYRO_SCALE * (imu.agmt.gyr.axes.y - g_cal.gyroOffset[1]);
   Gxyz[2] = GYRO_SCALE * (imu.agmt.gyr.axes.z - g_cal.gyroOffset[2]);
   
-  // Odczyt akcelerometru i normalizacja
+  // Read and normalize accelerometer
   Axyz[0] = imu.agmt.acc.axes.x;
   Axyz[1] = imu.agmt.acc.axes.y;
   Axyz[2] = imu.agmt.acc.axes.z;
   vector_normalize(Axyz);
   
-  // Odczyt magnetometru z mapowaniem osi dla AK09916
-  Mxyz[0] = imu.magY();      // Mapowanie osi
+  // Read magnetometer with axis mapping for AK09916
+  Mxyz[0] = imu.magY();
   Mxyz[1] = -imu.magX();
   Mxyz[2] = -imu.magZ();
   
-  // Aplikuj kalibrację magnetometru
+  // Apply calibration
   applyMagCalibration(Mxyz, McalXyz);
   vector_normalize(McalXyz);
   
-  // Uzgodnij osie mag z akcel (Y, Z odwrócone)
+  // Align mag axes with accel
   McalXyz[1] = -McalXyz[1];
   McalXyz[2] = -McalXyz[2];
   
-  // Oblicz delta time
+  // Calculate delta time
   unsigned long now = micros();
   float deltat = (now - g_ahrs.lastUpdate) * 1.0e-6f;
   g_ahrs.lastUpdate = now;
   
   if (!validateMagData()) return;
   
-  // Aktualizuj filtr Mahony AHRS
+  // Update Mahony AHRS
   MahonyQuaternionUpdate(Axyz[0], Axyz[1], Axyz[2],
                          Gxyz[0], Gxyz[1], Gxyz[2],
                          McalXyz[0], McalXyz[1], McalXyz[2], deltat);
   
-  // Konwersja na kąty Eulera
+  // Convert to Euler angles
   float yaw, pitch, roll;
   quaternionToEuler(g_ahrs.q, yaw, pitch, roll);
   
-  // Aplikuj deklinację (konwencja nawigacyjna: yaw rośnie CW od N)
+  // Apply declination
   yaw = -(yaw + MAGNETIC_DECLINATION);
   if (yaw < 0) yaw += 360.0f;
   if (yaw >= 360.0f) yaw -= 360.0f;
@@ -806,12 +709,12 @@ void processSensors(void) {
   g_sensor.yaw = yaw;
   g_sensor.headingGeo = yaw;
   
-  // Nagłówek magnetyczny (bez deklinacji)
+  // Magnetic heading (without declination)
   g_sensor.headingMag = yaw - MAGNETIC_DECLINATION;
   if (g_sensor.headingMag < 0) g_sensor.headingMag += 360.0f;
   if (g_sensor.headingMag >= 360.0f) g_sensor.headingMag -= 360.0f;
   
-  // Filtr EMA
+  // EMA filter
   if (!g_sensor.filtersReady) {
     g_sensor.rollFiltered = g_sensor.roll;
     g_sensor.pitchFiltered = g_sensor.pitch;
@@ -827,7 +730,7 @@ void processSensors(void) {
 }
 
 // ============================================================================
-// FUNKCJE FILTRÓW
+// FILTER FUNCTIONS
 // ============================================================================
 
 float emaFilter(float newVal, float oldVal, float alpha) {
@@ -850,7 +753,7 @@ float emaFilterAngle(float newAngle, float oldAngle, float alpha) {
 }
 
 // ============================================================================
-// FUNKCJE WYŚWIETLANIA
+// DISPLAY FUNCTIONS
 // ============================================================================
 
 void updateDisplay(void) {
@@ -858,7 +761,7 @@ void updateDisplay(void) {
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   
-  // Linia 1: Kąty pochylenia
+  // Line 1: Tilt angles
   display.setCursor(0, 0);
   display.print(F("X:"));
   display.print(g_sensor.rollFiltered, 1);
@@ -868,19 +771,19 @@ void updateDisplay(void) {
   float magDev = getDeviationFromNorth(g_sensor.headingMagFiltered);
   float geoDev = getDeviationFromNorth(g_sensor.headingGeoFiltered);
   
-  // Linia 2: Północ magnetyczna
+  // Line 2: Magnetic north
   display.setCursor(0, 11);
-  display.print(F("Mag:"));
+  display.print(F("M:"));
   display.print(magDev, 1);
-  display.print((char)247);  // Symbol stopnia
-  display.print(getCardinalDirection(g_sensor.headingMagFiltered));
+  display.print((char)247);
+  display.print(getCardinalChar(g_sensor.headingMagFiltered));
   
-  // Linia 3: Północ geograficzna
+  // Line 3: Geographic north
   display.setCursor(0, 22);
-  display.print(F("Geo:"));
+  display.print(F("G:"));
   display.print(geoDev, 1);
   display.print((char)247);
-  display.print(getCardinalDirection(g_sensor.headingGeoFiltered));
+  display.print(getCardinalChar(g_sensor.headingGeoFiltered));
   
   display.display();
 }
@@ -891,33 +794,28 @@ float getDeviationFromNorth(float heading) {
   return deviation;
 }
 
-const char* getCardinalDirection(float heading) {
-  if (heading >= 337.5f || heading < 22.5f)  return "N";
-  if (heading >= 22.5f  && heading < 67.5f)  return "NE";
-  if (heading >= 67.5f  && heading < 112.5f) return "E";
-  if (heading >= 112.5f && heading < 157.5f) return "SE";
-  if (heading >= 157.5f && heading < 202.5f) return "S";
-  if (heading >= 202.5f && heading < 247.5f) return "SW";
-  if (heading >= 247.5f && heading < 292.5f) return "W";
-  if (heading >= 292.5f && heading < 337.5f) return "NW";
-  return "?";
+char getCardinalChar(float heading) {
+  if (heading >= 315.0f || heading < 45.0f)  return 'N';
+  if (heading >= 45.0f  && heading < 135.0f) return 'E';
+  if (heading >= 135.0f && heading < 225.0f) return 'S';
+  return 'W';
 }
 
-void showMessage(const char* line1, const char* line2, const char* line3) {
+void showMsg(const char* l1, const char* l2, const char* l3) {
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   
   display.setCursor(0, 0);
-  display.println(line1);
-  if (line2) { display.setCursor(0, 11); display.println(line2); }
-  if (line3) { display.setCursor(0, 22); display.println(line3); }
+  display.println(l1);
+  if (l2) { display.setCursor(0, 11); display.println(l2); }
+  if (l3) { display.setCursor(0, 22); display.println(l3); }
   
   display.display();
 }
 
 // ============================================================================
-// FUNKCJE POMOCNICZE
+// HELPER FUNCTIONS
 // ============================================================================
 
 void trackRuntime(void) {
