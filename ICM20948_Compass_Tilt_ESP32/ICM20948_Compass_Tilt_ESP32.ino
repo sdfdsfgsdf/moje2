@@ -91,8 +91,7 @@
 #define MAG_CAL_MIN_TIME_MS   10000   // Minimum calibration time (10s)
 #define MAG_CAL_MAX_TIME_MS   120000  // Maximum calibration time (2 min)
 #define MAG_CAL_MIN_RANGE     80.0f   // Minimum range for X/Y axes (μT)
-#define MAG_CAL_MIN_SAMPLES   500     // Minimum samples for ellipsoid fit
-#define MAG_CAL_MAX_SAMPLES   2000    // Maximum samples to collect
+#define MAG_CAL_MIN_SAMPLES   300     // Minimum samples for good calibration
 #define MAG_UPDATE_INTERVAL   50      // ms between display updates
 
 // Accelerometer calibration
@@ -203,7 +202,8 @@ struct ButtonState {
 // ============================================================================
 
 // For ellipsoid fitting (ESP32 has enough RAM)
-#define MAX_CAL_SAMPLES 1000
+// Reduced from 1000 to 500 for better memory safety while still providing good calibration
+#define MAX_CAL_SAMPLES 500
 float g_magSamples[MAX_CAL_SAMPLES][3];
 int g_sampleCount = 0;
 
@@ -848,9 +848,13 @@ bool validateMagData(float mx, float my, float mz) {
   // Check for zero readings (sensor not ready)
   if (mx == 0 && my == 0 && mz == 0) return false;
   
-  // Check for out of range values
+  // Check for out of range values - any axis out of bounds invalidates reading
   if (fabs(mx) > MAG_VALID_MAX || fabs(my) > MAG_VALID_MAX || fabs(mz) > MAG_VALID_MAX) return false;
-  if (fabs(mx) < MAG_VALID_MIN && fabs(my) < MAG_VALID_MIN && fabs(mz) < MAG_VALID_MIN) return false;
+  
+  // Check if all axes have very low readings (noise only)
+  // At least one axis should have a meaningful reading
+  float magnitude = sqrtf(mx*mx + my*my + mz*mz);
+  if (magnitude < MAG_VALID_MIN) return false;
   
   return true;
 }
@@ -896,8 +900,9 @@ void processSensors(void) {
   float deltat = (now - g_ahrs.lastUpdate) * 1.0e-6f;
   g_ahrs.lastUpdate = now;
   
-  // Limit delta time to reasonable values
-  if (deltat > 0.1f) deltat = 0.1f;
+  // Limit delta time to reasonable values for AHRS stability
+  // Max 20ms to prevent large integration errors
+  if (deltat > 0.02f) deltat = 0.02f;
   if (deltat < 0.0001f) return;
   
   // Update Mahony AHRS
