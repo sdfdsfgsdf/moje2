@@ -339,18 +339,21 @@ void configureIMU(void) {
 // ============================================================================
 
 /**
- * @brief Calculate CRC8 checksum for calibration data
+ * @brief Calculate CRC8 checksum for calibration data from structure
  * @return CRC8 value
  * 
  * Uses polynomial 0x07 (CRC-8-CCITT)
+ * Calculates CRC directly from calibration structure for reliability
  */
 uint8_t calculateCRC8(void) {
   uint8_t crc = 0x00;
   
-  // Calculate CRC over calibration data bytes
-  for (uint8_t addr = EEPROM_MAG_OFF_X_ADDR; addr < EEPROM_CRC_ADDR; addr++) {
-    uint8_t data = EEPROM.read(addr);
-    crc ^= data;
+  // Create byte array from calibration data
+  uint8_t* data = (uint8_t*)&g_magCal.offsetX;
+  
+  // Calculate CRC over all calibration floats (6 floats * 4 bytes = 24 bytes)
+  for (uint8_t i = 0; i < 24; i++) {
+    crc ^= data[i];
     for (uint8_t bit = 0; bit < 8; bit++) {
       if (crc & 0x80) {
         crc = (crc << 1) ^ 0x07;
@@ -387,21 +390,31 @@ void loadCalibration(void) {
   EEPROM.get(EEPROM_CAL_VALID_ADDR, valid);
   
   if (valid == 1) {
-    // Verify CRC before loading
+    // First load calibration data to structure
+    EEPROM.get(EEPROM_MAG_OFF_X_ADDR, g_magCal.offsetX);
+    EEPROM.get(EEPROM_MAG_OFF_Y_ADDR, g_magCal.offsetY);
+    EEPROM.get(EEPROM_MAG_OFF_Z_ADDR, g_magCal.offsetZ);
+    EEPROM.get(EEPROM_MAG_SCL_X_ADDR, g_magCal.scaleX);
+    EEPROM.get(EEPROM_MAG_SCL_Y_ADDR, g_magCal.scaleY);
+    EEPROM.get(EEPROM_MAG_SCL_Z_ADDR, g_magCal.scaleZ);
+    
+    // Verify CRC of loaded data
     uint8_t storedCRC;
     EEPROM.get(EEPROM_CRC_ADDR, storedCRC);
     uint8_t calculatedCRC = calculateCRC8();
     
     if (storedCRC == calculatedCRC) {
-      EEPROM.get(EEPROM_MAG_OFF_X_ADDR, g_magCal.offsetX);
-      EEPROM.get(EEPROM_MAG_OFF_Y_ADDR, g_magCal.offsetY);
-      EEPROM.get(EEPROM_MAG_OFF_Z_ADDR, g_magCal.offsetZ);
-      EEPROM.get(EEPROM_MAG_SCL_X_ADDR, g_magCal.scaleX);
-      EEPROM.get(EEPROM_MAG_SCL_Y_ADDR, g_magCal.scaleY);
-      EEPROM.get(EEPROM_MAG_SCL_Z_ADDR, g_magCal.scaleZ);
       g_magCal.isValid = true;
     } else {
-      // CRC mismatch - calibration data corrupted
+      // CRC mismatch - calibration data corrupted, reset to defaults
+      g_magCal.offsetX = 0;
+      g_magCal.offsetY = 0;
+      g_magCal.offsetZ = 0;
+      g_magCal.scaleX = 1.0f;
+      g_magCal.scaleY = 1.0f;
+      g_magCal.scaleZ = 1.0f;
+      g_magCal.isValid = false;
+      
       showMessage("Cal CRC Error", "Recalibrate!");
       delay(2000);
       EEPROM.put(EEPROM_CAL_VALID_ADDR, (uint8_t)0);
