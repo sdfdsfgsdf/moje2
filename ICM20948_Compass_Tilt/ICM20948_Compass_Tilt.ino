@@ -687,13 +687,16 @@ void runCalibration(void) {
         unsigned long elapsed = millis() - startTime;
         bool minTimePassed = elapsed >= CALIBRATION_MIN_TIME_MS;
         
-        // Check completion (X, Y and optionally Z axes must have sufficient range)
-        bool xyComplete = (rangeX >= CALIBRATION_MIN_RANGE_UT) && 
-                          (rangeY >= CALIBRATION_MIN_RANGE_UT);
-        bool zComplete = !CALIBRATION_REQUIRE_Z_AXIS || 
-                         (rangeZ >= CALIBRATION_MIN_RANGE_UT);
+        // Check axis calibration status
+        bool xAxisCalibrated = (rangeX >= CALIBRATION_MIN_RANGE_UT);
+        bool yAxisCalibrated = (rangeY >= CALIBRATION_MIN_RANGE_UT);
+        bool zAxisCalibrated = (rangeZ >= CALIBRATION_MIN_RANGE_UT);
         
-        if (xyComplete && zComplete && minTimePassed) {
+        // Z-axis requirement: either not required, or already calibrated
+        bool zAxisRequirementMet = !CALIBRATION_REQUIRE_Z_AXIS || zAxisCalibrated;
+        
+        // All requirements must be met for completion
+        if (xAxisCalibrated && yAxisCalibrated && zAxisRequirementMet && minTimePassed) {
           complete = true;
         }
         
@@ -705,9 +708,9 @@ void runCalibration(void) {
           display.println(F("CAL OK!"));
         } else {
           display.print(F("CAL: "));
-          if (rangeX < CALIBRATION_MIN_RANGE_UT) display.print(F("X"));
-          if (rangeY < CALIBRATION_MIN_RANGE_UT) display.print(F("Y"));
-          if (CALIBRATION_REQUIRE_Z_AXIS && rangeZ < CALIBRATION_MIN_RANGE_UT) display.print(F("Z"));
+          if (!xAxisCalibrated) display.print(F("X"));
+          if (!yAxisCalibrated) display.print(F("Y"));
+          if (CALIBRATION_REQUIRE_Z_AXIS && !zAxisCalibrated) display.print(F("Z"));
           if (!minTimePassed) {
             display.print(F(" "));
             display.print((CALIBRATION_MIN_TIME_MS - elapsed) / 1000);
