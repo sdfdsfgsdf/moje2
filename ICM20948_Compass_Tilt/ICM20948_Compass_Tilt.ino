@@ -341,6 +341,38 @@ void configureIMU(void) {
 // ============================================================================
 
 /**
+ * @brief Helper to update CRC8 with a single byte
+ * @param crc Current CRC value
+ * @param data Byte to add to CRC
+ * @return Updated CRC value
+ */
+static uint8_t crc8UpdateByte(uint8_t crc, uint8_t data) {
+  crc ^= data;
+  for (uint8_t bit = 0; bit < 8; bit++) {
+    if (crc & 0x80) {
+      crc = (crc << 1) ^ 0x07;
+    } else {
+      crc <<= 1;
+    }
+  }
+  return crc;
+}
+
+/**
+ * @brief Helper to update CRC8 with a float value
+ * @param crc Current CRC value
+ * @param value Float value to add to CRC
+ * @return Updated CRC value
+ */
+static uint8_t crc8UpdateFloat(uint8_t crc, float value) {
+  uint8_t* ptr = (uint8_t*)&value;
+  for (size_t i = 0; i < sizeof(float); i++) {
+    crc = crc8UpdateByte(crc, ptr[i]);
+  }
+  return crc;
+}
+
+/**
  * @brief Calculate CRC8 checksum for calibration data from structure
  * @return CRC8 value
  * 
@@ -352,27 +384,12 @@ uint8_t calculateCRC8(void) {
   uint8_t crc = 0x00;
   
   // Calculate CRC over calibration float values only (6 floats)
-  // Using explicit field access to avoid structure padding issues
-  const size_t floatSize = sizeof(float);
-  uint8_t* ptr;
-  
-  ptr = (uint8_t*)&g_magCal.offsetX;
-  for (size_t i = 0; i < floatSize; i++) { crc ^= ptr[i]; for (uint8_t b = 0; b < 8; b++) crc = (crc & 0x80) ? (crc << 1) ^ 0x07 : crc << 1; }
-  
-  ptr = (uint8_t*)&g_magCal.offsetY;
-  for (size_t i = 0; i < floatSize; i++) { crc ^= ptr[i]; for (uint8_t b = 0; b < 8; b++) crc = (crc & 0x80) ? (crc << 1) ^ 0x07 : crc << 1; }
-  
-  ptr = (uint8_t*)&g_magCal.offsetZ;
-  for (size_t i = 0; i < floatSize; i++) { crc ^= ptr[i]; for (uint8_t b = 0; b < 8; b++) crc = (crc & 0x80) ? (crc << 1) ^ 0x07 : crc << 1; }
-  
-  ptr = (uint8_t*)&g_magCal.scaleX;
-  for (size_t i = 0; i < floatSize; i++) { crc ^= ptr[i]; for (uint8_t b = 0; b < 8; b++) crc = (crc & 0x80) ? (crc << 1) ^ 0x07 : crc << 1; }
-  
-  ptr = (uint8_t*)&g_magCal.scaleY;
-  for (size_t i = 0; i < floatSize; i++) { crc ^= ptr[i]; for (uint8_t b = 0; b < 8; b++) crc = (crc & 0x80) ? (crc << 1) ^ 0x07 : crc << 1; }
-  
-  ptr = (uint8_t*)&g_magCal.scaleZ;
-  for (size_t i = 0; i < floatSize; i++) { crc ^= ptr[i]; for (uint8_t b = 0; b < 8; b++) crc = (crc & 0x80) ? (crc << 1) ^ 0x07 : crc << 1; }
+  crc = crc8UpdateFloat(crc, g_magCal.offsetX);
+  crc = crc8UpdateFloat(crc, g_magCal.offsetY);
+  crc = crc8UpdateFloat(crc, g_magCal.offsetZ);
+  crc = crc8UpdateFloat(crc, g_magCal.scaleX);
+  crc = crc8UpdateFloat(crc, g_magCal.scaleY);
+  crc = crc8UpdateFloat(crc, g_magCal.scaleZ);
   
   return crc;
 }
