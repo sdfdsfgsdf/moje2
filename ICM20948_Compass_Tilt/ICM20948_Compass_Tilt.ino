@@ -5,6 +5,16 @@
  * Hardware: Arduino Pro Mini, ICM-20948 IMU, OLED 128x32
  * Based on: jremington/ICM_20948-AHRS, Cave Pearl Project
  * Location: Zywiec, Poland (49.6853N, 19.1925E), Declination: 5.5E
+ * 
+ * Calibration Method:
+ * Uses min/max method with 3x3 matrix format compatible with jremington/ICM_20948-AHRS.
+ * For full ellipsoid fitting, use the ESP32 version or external calibration tools.
+ * 
+ * References:
+ * - https://sailboatinstruments.blogspot.com/2011/08/improved-magnetometer-calibration.html
+ * - https://thecavepearlproject.org/2015/05/22/calibrating-any-compass-or-accelerometer-for-arduino/
+ * - https://github.com/jremington/ICM_20948-AHRS
+ * 
  * @license MIT
  */
 
@@ -61,9 +71,11 @@
 #define EEPROM_SHORT_RUNS_ADDR    4
 #define EEPROM_CAL_VALID_ADDR     8
 #define EEPROM_GYRO_OFF_ADDR      12    // 3 floats = 12 bytes
-#define EEPROM_MAG_MIN_ADDR       24    // 3 floats = 12 bytes  
-#define EEPROM_MAG_MAX_ADDR       36    // 3 floats = 12 bytes
-#define EEPROM_CRC_ADDR           48
+#define EEPROM_MAG_BIAS_ADDR      24    // 3 floats = 12 bytes (hard iron)
+#define EEPROM_MAG_AINV_ADDR      36    // 9 floats = 36 bytes (soft iron 3x3)
+#define EEPROM_MAG_MIN_ADDR       72    // 3 floats = 12 bytes  
+#define EEPROM_MAG_MAX_ADDR       84    // 3 floats = 12 bytes
+#define EEPROM_CRC_ADDR           96
 #define EEPROM_MAGIC_VALUE        0xCAFE
 
 // ============================================================================
@@ -86,10 +98,19 @@ struct SensorData {
 };
 
 /**
- * Calibration struct (Cave Pearl Project method)
+ * Calibration struct
+ * Uses 3x3 matrix format compatible with jremington/ICM_20948-AHRS
+ * On Arduino Pro Mini, we use min/max method due to RAM constraints,
+ * but store results in matrix format for compatibility.
  */
 struct Calibration {
   float gyroOffset[3];
+  // Hard Iron bias (compatible with jremington M_B format)
+  float magBias[3];
+  // Soft Iron matrix (compatible with jremington M_Ainv format)
+  // For min/max method, this is diagonal with scale factors
+  float magAinv[3][3];
+  // Original min/max values for reference
   float magMin[3];
   float magMax[3];
   bool isValid;
@@ -106,7 +127,14 @@ struct AHRSState {
 // ============================================================================
 
 SensorData    g_sensor = {0};
-Calibration   g_cal = {{0,0,0}, {-200,-200,-200}, {200,200,200}, false};
+Calibration   g_cal = {
+  {0, 0, 0},                          // gyroOffset
+  {0, 0, 0},                          // magBias
+  {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}},  // magAinv (identity)
+  {-200, -200, -200},                 // magMin
+  {200, 200, 200},                    // magMax
+  false                               // isValid
+};
 AHRSState     g_ahrs = {{1.0f, 0.0f, 0.0f, 0.0f}, {0,0,0}, 0};
 unsigned long g_startupTime = 0;
 unsigned long g_lastDisplayUpdate = 0;
@@ -129,6 +157,7 @@ uint8_t calculateCRC8(void);
 void runGyroCalibration(void);
 void runMagCalibration(void);
 void applyMagCalibration(float raw[3], float calibrated[3]);
+void initDefaultCalibration(void);
 
 void processSensors(void);
 bool validateMagData(void);
@@ -292,9 +321,28 @@ static uint8_t crc8UpdateFloat(uint8_t crc, float value) {
 uint8_t calculateCRC8(void) {
   uint8_t crc = 0x00;
   for (int i = 0; i < 3; i++) crc = crc8UpdateFloat(crc, g_cal.gyroOffset[i]);
+  for (int i = 0; i < 3; i++) crc = crc8UpdateFloat(crc, g_cal.magBias[i]);
+  for (int i = 0; i < 3; i++) {
+    for (int j = 0; j < 3; j++) {
+      crc = crc8UpdateFloat(crc, g_cal.magAinv[i][j]);
+    }
+  }
   for (int i = 0; i < 3; i++) crc = crc8UpdateFloat(crc, g_cal.magMin[i]);
   for (int i = 0; i < 3; i++) crc = crc8UpdateFloat(crc, g_cal.magMax[i]);
   return crc;
+}
+
+void initDefaultCalibration(void) {
+  for (int i = 0; i < 3; i++) {
+    g_cal.gyroOffset[i] = 0;
+    g_cal.magBias[i] = 0;
+    g_cal.magMin[i] = -200;
+    g_cal.magMax[i] = 200;
+    for (int j = 0; j < 3; j++) {
+      g_cal.magAinv[i][j] = (i == j) ? 1.0f : 0.0f;
+    }
+  }
+  g_cal.isValid = false;
 }
 
 void initEEPROM(void) {
@@ -317,11 +365,27 @@ void loadCalibration(void) {
       EEPROM.get(addr, g_cal.gyroOffset[i]);
       addr += sizeof(float);
     }
+    
+    addr = EEPROM_MAG_BIAS_ADDR;
+    for (int i = 0; i < 3; i++) {
+      EEPROM.get(addr, g_cal.magBias[i]);
+      addr += sizeof(float);
+    }
+    
+    addr = EEPROM_MAG_AINV_ADDR;
+    for (int i = 0; i < 3; i++) {
+      for (int j = 0; j < 3; j++) {
+        EEPROM.get(addr, g_cal.magAinv[i][j]);
+        addr += sizeof(float);
+      }
+    }
+    
     addr = EEPROM_MAG_MIN_ADDR;
     for (int i = 0; i < 3; i++) {
       EEPROM.get(addr, g_cal.magMin[i]);
       addr += sizeof(float);
     }
+    
     addr = EEPROM_MAG_MAX_ADDR;
     for (int i = 0; i < 3; i++) {
       EEPROM.get(addr, g_cal.magMax[i]);
@@ -334,16 +398,12 @@ void loadCalibration(void) {
     if (storedCRC == calculateCRC8()) {
       g_cal.isValid = true;
     } else {
-      // Reset to defaults
-      for (int i = 0; i < 3; i++) {
-        g_cal.gyroOffset[i] = 0;
-        g_cal.magMin[i] = -200;
-        g_cal.magMax[i] = 200;
-      }
-      g_cal.isValid = false;
+      initDefaultCalibration();
       showMsg("CRC Err!", "Recal");
       delay(2000);
     }
+  } else {
+    initDefaultCalibration();
   }
 }
 
@@ -353,11 +413,27 @@ void saveCalibration(void) {
     EEPROM.put(addr, g_cal.gyroOffset[i]);
     addr += sizeof(float);
   }
+  
+  addr = EEPROM_MAG_BIAS_ADDR;
+  for (int i = 0; i < 3; i++) {
+    EEPROM.put(addr, g_cal.magBias[i]);
+    addr += sizeof(float);
+  }
+  
+  addr = EEPROM_MAG_AINV_ADDR;
+  for (int i = 0; i < 3; i++) {
+    for (int j = 0; j < 3; j++) {
+      EEPROM.put(addr, g_cal.magAinv[i][j]);
+      addr += sizeof(float);
+    }
+  }
+  
   addr = EEPROM_MAG_MIN_ADDR;
   for (int i = 0; i < 3; i++) {
     EEPROM.put(addr, g_cal.magMin[i]);
     addr += sizeof(float);
   }
+  
   addr = EEPROM_MAG_MAX_ADDR;
   for (int i = 0; i < 3; i++) {
     EEPROM.put(addr, g_cal.magMax[i]);
@@ -501,10 +577,34 @@ void runMagCalibration(void) {
     delay(10);
   }
   
-  // Save results
+  // Save min/max for reference
   for (int i = 0; i < 3; i++) {
     g_cal.magMin[i] = magMin[i];
     g_cal.magMax[i] = magMax[i];
+  }
+  
+  // Calculate calibration parameters in jremington-compatible format
+  float delta[3];
+  for (int i = 0; i < 3; i++) {
+    // Hard Iron bias (center of min/max range)
+    g_cal.magBias[i] = (magMax[i] + magMin[i]) * 0.5f;
+    delta[i] = magMax[i] - magMin[i];
+  }
+  
+  // Calculate average diameter for soft iron scaling
+  float avgDelta = (delta[0] + delta[1] + delta[2]) / 3.0f;
+  
+  // Build soft iron matrix (diagonal scaling, no cross-axis correction)
+  for (int i = 0; i < 3; i++) {
+    for (int j = 0; j < 3; j++) {
+      if (i == j) {
+        // Diagonal: scale factor
+        g_cal.magAinv[i][j] = (delta[i] > 1.0f) ? (avgDelta / delta[i]) : 1.0f;
+      } else {
+        // Off-diagonal: zero
+        g_cal.magAinv[i][j] = 0.0f;
+      }
+    }
   }
   
   saveCalibration();
@@ -514,21 +614,24 @@ void runMagCalibration(void) {
 }
 
 /**
- * Apply magnetometer calibration (Hard/Soft Iron correction)
+ * Apply magnetometer calibration using 3x3 matrix multiplication
+ * Format compatible with jremington/ICM_20948-AHRS
+ * 
+ * Calibrated = A_inv * (Raw - Bias)
  */
 void applyMagCalibration(float raw[3], float calibrated[3]) {
-  float offset[3], delta[3], scale[3];
+  float temp[3];
   
+  // Step 1: Subtract hard iron bias
   for (int i = 0; i < 3; i++) {
-    offset[i] = (g_cal.magMax[i] + g_cal.magMin[i]) * 0.5f;
-    delta[i] = g_cal.magMax[i] - g_cal.magMin[i];
+    temp[i] = raw[i] - g_cal.magBias[i];
   }
   
-  float avgDelta = (delta[0] + delta[1] + delta[2]) / 3.0f;
-  
+  // Step 2: Apply soft iron correction matrix (3x3 multiplication)
   for (int i = 0; i < 3; i++) {
-    scale[i] = (delta[i] > 1.0f) ? avgDelta / delta[i] : 1.0f;
-    calibrated[i] = (raw[i] - offset[i]) * scale[i];
+    calibrated[i] = g_cal.magAinv[i][0] * temp[0] + 
+                    g_cal.magAinv[i][1] * temp[1] + 
+                    g_cal.magAinv[i][2] * temp[2];
   }
 }
 

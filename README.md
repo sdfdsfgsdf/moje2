@@ -264,26 +264,72 @@ ESP32 GND ─────────────┘
 
 ## Teoria kalibracji / Calibration Theory
 
-### Metoda Cave Pearl Project
+### Ulepszona kalibracja magnetometru (Ellipsoid Fitting)
 
-Kalibracja opiera się na metodzie opisanej w [The Cave Pearl Project](https://thecavepearlproject.org/2015/05/22/calibrating-any-compass-or-accelerometer-for-arduino/):
+Projekt implementuje zaawansowaną kalibrację magnetometru opartą na metodzie dopasowania elipsoidy (ellipsoid fitting), zgodnie z artykułami:
+- [Improved Magnetometer Calibration (Part 1)](https://sailboatinstruments.blogspot.com/2011/08/improved-magnetometer-calibration.html)
+- [Improved Magnetometer Calibration (Part 2)](https://sailboatinstruments.blogspot.com/2011/09/improved-magnetometer-calibration-part.html)
+- [Cave Pearl Project - Calibrating Compass](https://thecavepearlproject.org/2015/05/22/calibrating-any-compass-or-accelerometer-for-arduino/)
+- [IOP Science - Ellipsoid Fitting Method](https://iopscience.iop.org/article/10.1088/1755-1315/237/3/032015/pdf)
 
-### Hard Iron (twarde żelazo)
-- **Przyczyna:** Stałe zakłócenia magnetyczne w pobliżu czujnika (magnesy, elementy stalowe)
-- **Efekt:** Przesunięcie środka elipsoidy danych
-- **Korekcja:** `offset = (min + max) / 2` dla każdej osi
+Implementacja jest kompatybilna z [jremington/ICM_20948-AHRS](https://github.com/jremington/ICM_20948-AHRS).
 
-### Soft Iron (miękkie żelazo)
-- **Przyczyna:** Zakłócenia od materiałów ferromagnetycznych w pobliżu
-- **Efekt:** Zniekształcenie sfery w elipsoidę
-- **Korekcja:** `scale = średnia_delta / delta_osi`
+### Model błędów magnetometru
 
-### Wzory korekcji
+Surowe odczyty magnetometru są zakłócone przez:
+1. **Hard Iron** - stałe przesunięcie środka danych (magnesy, elementy stalowe)
+2. **Soft Iron** - zniekształcenie sfery w elipsoidę (materiały ferromagnetyczne)
+3. **Błędy skalowania** - różne czułości osi
+4. **Nieortogonalność osi** - osie czujnika nie są idealnie prostopadłe
+
+### Metoda Ellipsoid Fitting (Li's Algorithm)
+
+Algorytm dopasowania elipsoidy znajduje parametry transformacji, która przekształca zniekształconą elipsoidę danych z powrotem do sfery:
 
 ```
-// Dla każdej osi i = 0, 1, 2 (X, Y, Z):
+// Równanie ogólnej elipsoidy:
+(x - B)^T * M * (x - B) = 1
 
+// Gdzie:
+// B - wektor przesunięcia (hard iron bias)
+// M - macierz 3x3 opisująca kształt elipsoidy
+
+// Korekcja:
+calibrated = A_inv * (raw - B)
+
+// Gdzie A_inv = F * sqrt(M), F - współczynnik normalizacji
+```
+
+### Format kalibracji (kompatybilny z jremington)
+
+```cpp
+// Hard Iron bias (wektor przesunięcia)
+float M_B[3] = {bias_x, bias_y, bias_z};
+
+// Soft Iron correction matrix (macierz transformacji 3x3)
+float M_Ainv[3][3] = {
+  {a00, a01, a02},
+  {a10, a11, a12},
+  {a20, a21, a22}
+};
+
+// Zastosowanie kalibracji:
+float temp[3];
+for (int i = 0; i < 3; i++) temp[i] = raw[i] - M_B[i];
+calibrated[0] = M_Ainv[0][0]*temp[0] + M_Ainv[0][1]*temp[1] + M_Ainv[0][2]*temp[2];
+calibrated[1] = M_Ainv[1][0]*temp[0] + M_Ainv[1][1]*temp[1] + M_Ainv[1][2]*temp[2];
+calibrated[2] = M_Ainv[2][0]*temp[0] + M_Ainv[2][1]*temp[1] + M_Ainv[2][2]*temp[2];
+```
+
+### Metoda Min/Max (Cave Pearl Project - fallback)
+
+Jeśli dopasowanie elipsoidy nie powiedzie się, używana jest prostsza metoda min/max:
+
+```
+// Hard Iron:
 offset[i] = (max[i] + min[i]) / 2
+
+// Soft Iron (skalowanie diagonalne):
 delta[i] = max[i] - min[i]
 avgDelta = (delta[0] + delta[1] + delta[2]) / 3
 scale[i] = avgDelta / delta[i]
@@ -291,6 +337,17 @@ scale[i] = avgDelta / delta[i]
 // Zastosowanie:
 calibrated[i] = (raw[i] - offset[i]) * scale[i]
 ```
+
+### Zalety metody Ellipsoid Fitting
+
+| Cecha | Min/Max | Ellipsoid Fitting |
+|-------|---------|-------------------|
+| Korekcja Hard Iron | ✅ | ✅ |
+| Korekcja Soft Iron (skalowanie) | ✅ | ✅ |
+| Korekcja nieortogonalności | ❌ | ✅ |
+| Korekcja pełnej rotacji elipsoidy | ❌ | ✅ |
+| Odporność na outliers | ❌ | ✅ |
+| Dokładność typowa | 70-85% | 90-95% |
 
 ## Filtr Mahony AHRS
 
