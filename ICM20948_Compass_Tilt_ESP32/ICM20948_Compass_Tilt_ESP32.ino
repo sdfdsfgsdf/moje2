@@ -124,6 +124,14 @@
 #define MAG_VALID_MAX         4800.0f // Maximum valid mag reading (Earth's field ~25-65 μT)
 
 // ============================================================================
+// NUMERICAL CONSTANTS FOR MATRIX OPERATIONS
+// ============================================================================
+
+#define MATRIX_EPSILON        1e-10f  // Threshold for singularity detection
+#define CHOLESKY_MIN_DIAG     0.001f  // Minimum diagonal value for Cholesky decomposition
+#define ELLIPSOID_FIT_MAX_RESIDUAL 50.0f  // Maximum residual (%) for successful fit
+
+// ============================================================================
 // BUTTON DEBOUNCE
 // ============================================================================
 
@@ -234,7 +242,10 @@ struct ButtonState {
 
 // For ellipsoid fitting (ESP32 has enough RAM)
 // Increased to 600 samples for better ellipsoid fitting accuracy
-#define MAX_CAL_SAMPLES 600
+// For ellipsoid fitting (ESP32 has ~320KB available RAM)
+// Memory usage: 500 samples * 3 floats * 4 bytes = 6KB
+// This provides good calibration accuracy while leaving ample RAM for other operations
+#define MAX_CAL_SAMPLES 500
 float g_magSamples[MAX_CAL_SAMPLES][3];
 int g_sampleCount = 0;
 
@@ -1505,7 +1516,7 @@ float matrix3x3Determinant(float M[3][3]) {
  */
 void matrix3x3Inverse(float M[3][3], float Minv[3][3]) {
   float det = matrix3x3Determinant(M);
-  if (fabsf(det) < 1e-10f) {
+  if (fabsf(det) < MATRIX_EPSILON) {
     // Singular matrix - return identity
     for (int i = 0; i < 3; i++) {
       for (int j = 0; j < 3; j++) {
@@ -1564,13 +1575,13 @@ void choleskyDecomposition(float A[3][3], float L[3][3]) {
           sum += L[j][k] * L[j][k];
         }
         float val = A[j][j] - sum;
-        L[j][j] = (val > 0) ? sqrtf(val) : 0.001f;
+        L[j][j] = (val > 0) ? sqrtf(val) : CHOLESKY_MIN_DIAG;
       } else {
         // Off-diagonal elements
         for (int k = 0; k < j; k++) {
           sum += L[i][k] * L[j][k];
         }
-        L[i][j] = (fabsf(L[j][j]) > 1e-10f) ? (A[i][j] - sum) / L[j][j] : 0;
+        L[i][j] = (fabsf(L[j][j]) > MATRIX_EPSILON) ? (A[i][j] - sum) / L[j][j] : 0;
       }
     }
   }
@@ -1811,6 +1822,6 @@ bool ellipsoidFit(float samples[][3], int n, float Ainv[3][3], float bias[3], fl
   
   *residual = sqrtf(sumResidual / n) * 100.0f;  // As percentage
   
-  // Consider it successful if residual is reasonable
-  return (*residual < 50.0f);
+  // Consider it successful if residual is below threshold
+  return (*residual < ELLIPSOID_FIT_MAX_RESIDUAL);
 }
