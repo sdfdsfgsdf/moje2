@@ -82,7 +82,9 @@
 #define EEPROM_MAGIC_VALUE        0xCAFE  // Magic value for EEPROM validation
 
 // --- Calibration Z-axis requirement (for tilted operation) ---
-#define CALIBRATION_REQUIRE_Z_AXIS  false // Set to true for better accuracy at high tilt angles
+// Set to true for better accuracy at high tilt angles (>30°)
+// Trade-off: requires more complete rotation during calibration
+#define CALIBRATION_REQUIRE_Z_AXIS  false
 
 // ============================================================================
 // GLOBAL OBJECTS
@@ -344,24 +346,33 @@ void configureIMU(void) {
  * 
  * Uses polynomial 0x07 (CRC-8-CCITT)
  * Calculates CRC directly from calibration structure for reliability
+ * Only includes calibration floats (offsets and scales), not the isValid flag
  */
 uint8_t calculateCRC8(void) {
   uint8_t crc = 0x00;
   
-  // Create byte array from calibration data
-  uint8_t* data = (uint8_t*)&g_magCal.offsetX;
+  // Calculate CRC over calibration float values only (6 floats)
+  // Using explicit field access to avoid structure padding issues
+  const size_t floatSize = sizeof(float);
+  uint8_t* ptr;
   
-  // Calculate CRC over all calibration floats (6 floats * 4 bytes = 24 bytes)
-  for (uint8_t i = 0; i < 24; i++) {
-    crc ^= data[i];
-    for (uint8_t bit = 0; bit < 8; bit++) {
-      if (crc & 0x80) {
-        crc = (crc << 1) ^ 0x07;
-      } else {
-        crc <<= 1;
-      }
-    }
-  }
+  ptr = (uint8_t*)&g_magCal.offsetX;
+  for (size_t i = 0; i < floatSize; i++) { crc ^= ptr[i]; for (uint8_t b = 0; b < 8; b++) crc = (crc & 0x80) ? (crc << 1) ^ 0x07 : crc << 1; }
+  
+  ptr = (uint8_t*)&g_magCal.offsetY;
+  for (size_t i = 0; i < floatSize; i++) { crc ^= ptr[i]; for (uint8_t b = 0; b < 8; b++) crc = (crc & 0x80) ? (crc << 1) ^ 0x07 : crc << 1; }
+  
+  ptr = (uint8_t*)&g_magCal.offsetZ;
+  for (size_t i = 0; i < floatSize; i++) { crc ^= ptr[i]; for (uint8_t b = 0; b < 8; b++) crc = (crc & 0x80) ? (crc << 1) ^ 0x07 : crc << 1; }
+  
+  ptr = (uint8_t*)&g_magCal.scaleX;
+  for (size_t i = 0; i < floatSize; i++) { crc ^= ptr[i]; for (uint8_t b = 0; b < 8; b++) crc = (crc & 0x80) ? (crc << 1) ^ 0x07 : crc << 1; }
+  
+  ptr = (uint8_t*)&g_magCal.scaleY;
+  for (size_t i = 0; i < floatSize; i++) { crc ^= ptr[i]; for (uint8_t b = 0; b < 8; b++) crc = (crc & 0x80) ? (crc << 1) ^ 0x07 : crc << 1; }
+  
+  ptr = (uint8_t*)&g_magCal.scaleZ;
+  for (size_t i = 0; i < floatSize; i++) { crc ^= ptr[i]; for (uint8_t b = 0; b < 8; b++) crc = (crc & 0x80) ? (crc << 1) ^ 0x07 : crc << 1; }
   
   return crc;
 }
