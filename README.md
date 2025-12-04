@@ -37,7 +37,7 @@ Projekt do pomiaru pochylenia i wskazywania północy magnetycznej oraz geografi
 ### Korekcja magnetometru
 - ✅ Korekcja Hard Iron (przesunięcie środka elipsoidy)
 - ✅ Korekcja Soft Iron (skalowanie osi do sfery)
-- ✅ Zbieranie do 1000 próbek dla lepszej dokładności
+- ✅ Zbieranie do 500 próbek dla lepszej dokładności
 - ✅ Automatyczne wykrywanie zakończenia kalibracji
 
 ### Optymalizacje ESP32
@@ -372,7 +372,7 @@ lib_deps =
 | Zapis | EEPROM + CRC | NVS (Flash) |
 | Wyświetlacz | 128x32 | 128x64 |
 | Próbki żyroskopu | 500 | 1000 |
-| Próbki magnetometru | Min/Max tylko | Do 1000 punktów |
+| Próbki magnetometru | Min/Max tylko | Do 500 punktów |
 | Aktualizacja wyśw. | 4 Hz | 10 Hz |
 | Monitor szeregowy | Ograniczony | Pełna diagnostyka |
 
