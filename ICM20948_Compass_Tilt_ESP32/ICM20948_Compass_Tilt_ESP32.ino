@@ -1170,10 +1170,13 @@ void showCalibrationScreen(const char* title, const char* line1,
   if (line1) {
     display.setCursor(0, 10);
     display.print(line1);
-  }
-  if (line2) {
-    // Show line2 next to line1 if space allows
-    display.print(F(" "));
+    if (line2) {
+      // Show line2 next to line1 if space allows
+      display.print(F(" "));
+      display.print(line2);
+    }
+  } else if (line2) {
+    display.setCursor(0, 10);
     display.print(line2);
   }
   
@@ -1181,7 +1184,7 @@ void showCalibrationScreen(const char* title, const char* line1,
   if (progress >= 0) {
     int barY = 23;
     int barH = 7;
-    int barW = SCREEN_WIDTH - 30;
+    int barW = SCREEN_WIDTH - 30;  // Leave 30px for percentage text (e.g. "100%")
     
     display.drawRect(0, barY, barW, barH, SSD1306_WHITE);
     int fillW = (progress * (barW - 2)) / 100;
@@ -1207,10 +1210,11 @@ void showMsg(const char* l1, const char* l2, const char* l3, const char* l4) {
   display.setTextColor(SSD1306_WHITE);
   
   // Compact layout for 32-pixel height (3 lines max, 11 pixels spacing)
+  // Note: l4 parameter kept for API compatibility but ignored due to display height
   if (l1) { display.setCursor(0, 0);  display.println(l1); }
   if (l2) { display.setCursor(0, 11); display.println(l2); }
   if (l3) { display.setCursor(0, 22); display.println(l3); }
-  // l4 ignored on 32-pixel display - not enough space
+  (void)l4;  // Suppress unused parameter warning
   
   display.display();
 }
