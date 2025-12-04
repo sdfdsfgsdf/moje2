@@ -10,7 +10,7 @@
  * - Hard Iron and Soft Iron correction
  * - Mahony AHRS filter with gyroscope integration
  * 
- * Hardware: ESP32-WROOM-32D, ICM-20948 IMU, OLED 128x64/128x32
+ * Hardware: ESP32-WROOM-32D, ICM-20948 IMU, OLED 128x32
  * Based on: jremington/ICM_20948-AHRS, Cave Pearl Project, Pololu magnetometer correction
  * Location: Zywiec, Poland (49.6853N, 19.1925E), Declination: 5.5E
  * 
@@ -47,7 +47,7 @@
 // ============================================================================
 
 #define SCREEN_WIDTH      128
-#define SCREEN_HEIGHT     64   // ESP32 can easily handle 128x64
+#define SCREEN_HEIGHT     32   // Changed to 128x32 OLED
 #define OLED_RESET        -1
 #define OLED_I2C_ADDRESS  0x3C
 
@@ -1110,54 +1110,36 @@ void updateDisplay(void) {
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   
-  // Title bar
+  // Line 1: Tilt angles
   display.setCursor(0, 0);
-  display.print(F("Compass ESP32"));
+  display.print(F("X:"));
+  display.print(g_sensor.rollFiltered, 1);
+  display.print(F(" Y:"));
+  display.print(g_sensor.pitchFiltered, 1);
   if (!g_cal.isValid) {
-    display.print(F(" [!CAL]"));
+    display.print(F(" !"));
   }
   
-  // Divider line
-  display.drawFastHLine(0, 10, SCREEN_WIDTH, SSD1306_WHITE);
-  
-  // Line 2: Tilt angles
-  display.setCursor(0, 14);
-  display.print(F("Roll:"));
-  display.print(g_sensor.rollFiltered, 1);
-  display.print((char)247);  // degree symbol
-  display.print(F(" Pitch:"));
-  display.print(g_sensor.pitchFiltered, 1);
-  display.print((char)247);
-  
-  // Line 3: Magnetic heading
   float magDev = getDeviationFromNorth(g_sensor.headingMagFiltered);
-  display.setCursor(0, 26);
-  display.print(F("Mag: "));
-  if (magDev >= 0) display.print(F(" "));
+  float geoDev = getDeviationFromNorth(g_sensor.headingGeoFiltered);
+  
+  // Line 2: Magnetic north
+  display.setCursor(0, 11);
+  display.print(F("M:"));
   display.print(magDev, 1);
   display.print((char)247);
-  display.print(F(" "));
   display.print(getCardinalChar(g_sensor.headingMagFiltered));
   
-  // Line 4: Geographic heading
-  float geoDev = getDeviationFromNorth(g_sensor.headingGeoFiltered);
-  display.setCursor(0, 38);
-  display.print(F("Geo: "));
-  if (geoDev >= 0) display.print(F(" "));
+  // Line 3: Geographic north
+  display.setCursor(0, 22);
+  display.print(F("G:"));
   display.print(geoDev, 1);
   display.print((char)247);
-  display.print(F(" "));
   display.print(getCardinalChar(g_sensor.headingGeoFiltered));
   
-  // Line 5: Compass rose visualization
-  display.setCursor(0, 50);
-  display.print(F("Heading: "));
-  display.print((int)g_sensor.headingGeoFiltered);
-  display.print((char)247);
-  
-  // Draw simple compass indicator
+  // Draw simple compass indicator on right side
   int cx = 110;  // Center x
-  int cy = 50;   // Center y
+  int cy = 16;   // Center y (middle of 32-pixel height)
   int r = 10;    // Radius
   display.drawCircle(cx, cy, r, SSD1306_WHITE);
   
@@ -1180,45 +1162,40 @@ void showCalibrationScreen(const char* title, const char* line1,
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   
-  // Title (inverted)
-  display.fillRect(0, 0, SCREEN_WIDTH, 12, SSD1306_WHITE);
-  display.setTextColor(SSD1306_BLACK);
-  display.setCursor(2, 2);
+  // Title line
+  display.setCursor(0, 0);
   display.print(title);
-  display.setTextColor(SSD1306_WHITE);
   
-  // Messages
+  // Messages (compact layout for 32-pixel height)
   if (line1) {
-    display.setCursor(0, 16);
+    display.setCursor(0, 10);
     display.print(line1);
   }
   if (line2) {
-    display.setCursor(0, 28);
+    // Show line2 next to line1 if space allows
+    display.print(F(" "));
     display.print(line2);
   }
-  if (line3) {
-    display.setCursor(0, 40);
-    display.print(line3);
-  }
   
-  // Progress bar (if >= 0)
+  // Progress bar (if >= 0) or line3
   if (progress >= 0) {
-    int barY = 54;
-    int barH = 8;
-    int barW = SCREEN_WIDTH - 4;
+    int barY = 23;
+    int barH = 7;
+    int barW = SCREEN_WIDTH - 30;
     
-    display.drawRect(2, barY, barW, barH, SSD1306_WHITE);
+    display.drawRect(0, barY, barW, barH, SSD1306_WHITE);
     int fillW = (progress * (barW - 2)) / 100;
     if (fillW > 0) {
-      display.fillRect(3, barY + 1, fillW, barH - 2, SSD1306_WHITE);
+      display.fillRect(1, barY + 1, fillW, barH - 2, SSD1306_WHITE);
     }
     
     // Show percentage
-    display.setCursor(barW / 2 - 6, barY + 1);
-    display.setTextColor(progress < 50 ? SSD1306_WHITE : SSD1306_BLACK);
+    display.setCursor(barW + 3, barY);
     display.print(progress);
     display.print(F("%"));
-    display.setTextColor(SSD1306_WHITE);
+  } else if (line3) {
+    display.setCursor(0, 22);
+    display.print(line3);
   }
   
   display.display();
@@ -1229,10 +1206,11 @@ void showMsg(const char* l1, const char* l2, const char* l3, const char* l4) {
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   
+  // Compact layout for 32-pixel height (3 lines max, 11 pixels spacing)
   if (l1) { display.setCursor(0, 0);  display.println(l1); }
-  if (l2) { display.setCursor(0, 14); display.println(l2); }
-  if (l3) { display.setCursor(0, 28); display.println(l3); }
-  if (l4) { display.setCursor(0, 42); display.println(l4); }
+  if (l2) { display.setCursor(0, 11); display.println(l2); }
+  if (l3) { display.setCursor(0, 22); display.println(l3); }
+  // l4 ignored on 32-pixel display - not enough space
   
   display.display();
 }
