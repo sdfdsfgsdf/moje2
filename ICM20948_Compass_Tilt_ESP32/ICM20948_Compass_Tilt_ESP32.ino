@@ -38,6 +38,7 @@
 #include <Adafruit_SSD1306.h>
 #include <Preferences.h>
 #include "ICM_20948.h"
+#include <esp_task_wdt.h>
 
 // ============================================================================
 // ESP32-WROOM-32D PIN CONFIGURATION
@@ -70,6 +71,21 @@
 
 #define ICM_AD0_VAL       1    // AD0 pin state (0 = GND = 0x68, 1 = VCC = 0x69)
 #define ICM_I2C_SPEED     400000
+
+// ============================================================================
+// I2C STABILITY CONFIGURATION
+// ============================================================================
+
+#define I2C_RETRY_COUNT       3       // Number of retries for I2C operations
+#define I2C_RETRY_DELAY_MS    5       // Delay between retries (ms)
+#define I2C_TIMEOUT_MS        50      // Timeout for I2C operations (ms)
+#define I2C_BUS_RECOVERY_CLOCKS 16    // Clock pulses for bus recovery
+
+// ============================================================================
+// WATCHDOG CONFIGURATION
+// ============================================================================
+
+#define WDT_TIMEOUT_SECONDS   10      // Watchdog timeout in seconds
 
 // ============================================================================
 // LOCATION DATA (Żywiec, Poland)
@@ -266,13 +282,15 @@ ButtonState   g_button = {HIGH, HIGH, 0, 0, false, false};
 
 unsigned long g_lastDisplayUpdate = 0;
 bool          g_calibrationMode = false;
+volatile bool g_i2cError = false;        // Flag for I2C errors
+unsigned long g_lastI2cSuccess = 0;      // Last successful I2C operation timestamp
+uint32_t      g_i2cErrorCount = 0;       // Total I2C error count
 
 // ============================================================================
 // FUNCTION PROTOTYPES
 // ============================================================================
 
 // Initialization
-void initDisplay(void);
 bool initIMU(void);
 void configureIMU(void);
 void initButton(void);
@@ -336,6 +354,13 @@ void updateButton(void);
 bool wasButtonPressed(void);
 bool wasLongPress(void);
 
+// I2C stability
+void initWatchdog(void);
+void feedWatchdog(void);
+bool recoverI2cBus(void);
+bool safeDisplayUpdate(void);
+bool checkI2cDevices(void);
+
 // ============================================================================
 // SETUP
 // ============================================================================
@@ -350,6 +375,8 @@ void setup() {
   // Initialize I2C with ESP32 pins
   Wire.begin(I2C_SDA, I2C_SCL);
   Wire.setClock(ICM_I2C_SPEED);
+  // ESP32 Arduino Wire uses setTimeOut (capital O), different from standard Arduino setTimeout
+  Wire.setTimeOut(I2C_TIMEOUT_MS);  // Set I2C timeout in milliseconds
   
   // Initialize button
   initButton();
@@ -358,21 +385,70 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
   
-  // Initialize display
-  initDisplay();
-  showMsg("ICM20948 Compass", "ESP32", "Init...");
+  // Initialize watchdog timer for stability
+  initWatchdog();
+  
+  // Check I2C bus and recover if needed
+  if (!checkI2cDevices()) {
+    Serial.println(F("I2C devices not found, attempting bus recovery..."));
+    recoverI2cBus();
+    delay(100);
+    if (!checkI2cDevices()) {
+      Serial.println(F("I2C bus recovery failed!"));
+    }
+  }
+  
+  // Initialize display with retry
+  bool displayOk = false;
+  for (int retry = 0; retry < I2C_RETRY_COUNT && !displayOk; retry++) {
+    feedWatchdog();
+    displayOk = display.begin(SSD1306_SWITCHCAPVCC, OLED_I2C_ADDRESS);
+    if (!displayOk) {
+      Serial.printf("Display init attempt %d failed\n", retry + 1);
+      delay(100);
+    }
+  }
+  
+  if (!displayOk) {
+    Serial.println(F("ERROR: SSD1306 allocation failed after retries"));
+    // Continue without display - don't hang
+  } else {
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    safeDisplayUpdate();
+    showMsg("ICM20948 Compass", "ESP32", "Init...");
+  }
   delay(500);
   
-  // Initialize IMU
-  if (!initIMU()) {
-    showMsg("ERROR!", "IMU not found", "SDA:21 SCL:22");
-    Serial.println(F("ERROR: IMU initialization failed!"));
-    while (true) {
-      digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+  feedWatchdog();
+  
+  // Initialize IMU with retry
+  bool imuOk = false;
+  for (int retry = 0; retry < I2C_RETRY_COUNT && !imuOk; retry++) {
+    feedWatchdog();
+    imuOk = initIMU();
+    if (!imuOk) {
+      Serial.printf("IMU init attempt %d failed\n", retry + 1);
+      recoverI2cBus();
       delay(200);
     }
   }
   
+  if (!imuOk) {
+    showMsg("ERROR!", "IMU not found", "SDA:21 SCL:22");
+    Serial.println(F("ERROR: IMU initialization failed!"));
+    // Blink LED but don't hang forever - watchdog will reset if needed
+    unsigned long errorStart = millis();
+    while (millis() - errorStart < 30000) {  // 30s timeout instead of infinite
+      feedWatchdog();
+      digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+      delay(200);
+    }
+    ESP.restart();  // Restart after timeout
+  }
+  
+  feedWatchdog();
   configureIMU();
   Serial.println(F("IMU initialized successfully"));
   
@@ -387,6 +463,7 @@ void setup() {
     Serial.println(F("No valid calibration found"));
   }
   delay(2000);
+  feedWatchdog();
   
   // Quick gyro calibration at startup
   if (!g_cal.isValid) {
@@ -397,9 +474,11 @@ void setup() {
   
   // Initialize AHRS timing
   g_ahrs.lastUpdate = micros();
+  g_lastI2cSuccess = millis();
   
   showMsg("Ready!", "Hold BTN 2s", "for full cal");
   delay(1500);
+  feedWatchdog();
   
   Serial.println(F("System ready!"));
 }
@@ -409,6 +488,9 @@ void setup() {
 // ============================================================================
 
 void loop() {
+  // Feed watchdog to prevent reset
+  feedWatchdog();
+  
   // Update button state
   updateButton();
   
@@ -420,19 +502,46 @@ void loop() {
     g_sensor.filtersReady = false;  // Reset filters
   }
   
+  // Check for I2C bus health - recover if no successful communication for too long
+  if (millis() - g_lastI2cSuccess > 5000) {
+    Serial.println(F("I2C timeout - attempting bus recovery"));
+    g_i2cError = true;
+    if (recoverI2cBus()) {
+      g_lastI2cSuccess = millis();
+      g_i2cError = false;
+      Serial.println(F("I2C bus recovered"));
+    } else {
+      Serial.println(F("I2C recovery failed - restarting..."));
+      delay(100);
+      ESP.restart();
+    }
+  }
+  
   // Normal operation - read sensors and update display
   if (imu.dataReady()) {
     imu.getAGMT();
-    processSensors();
+    if (imu.status == ICM_20948_Stat_Ok) {
+      g_lastI2cSuccess = millis();
+      g_i2cError = false;
+      processSensors();
+    } else {
+      g_i2cErrorCount++;
+      if (g_i2cErrorCount % 100 == 0) {
+        Serial.printf("I2C errors: %d\n", g_i2cErrorCount);
+      }
+    }
   }
   
   // Update display at fixed interval
   if (millis() - g_lastDisplayUpdate >= DISPLAY_UPDATE_MS) {
     g_lastDisplayUpdate = millis();
-    updateDisplay();
+    if (!safeDisplayUpdate()) {
+      // Display update failed - try recovery
+      recoverI2cBus();
+    }
   }
   
-  // Small delay to prevent tight loop
+  // Small delay to prevent tight loop and allow other tasks
   delay(1);
 }
 
@@ -440,15 +549,132 @@ void loop() {
 // INITIALIZATION FUNCTIONS
 // ============================================================================
 
-void initDisplay(void) {
-  if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_I2C_ADDRESS)) {
-    Serial.println(F("ERROR: SSD1306 allocation failed"));
-    while (true) delay(100);
+/**
+ * @brief Initialize and configure the watchdog timer
+ * Provides automatic reset if the program hangs
+ */
+void initWatchdog(void) {
+  // Initialize Task Watchdog Timer (TWDT)
+  esp_task_wdt_init(WDT_TIMEOUT_SECONDS, true);  // true = panic on timeout (reset)
+  esp_task_wdt_add(NULL);  // Add current task to WDT
+  Serial.printf("Watchdog initialized with %ds timeout\n", WDT_TIMEOUT_SECONDS);
+}
+
+/**
+ * @brief Feed the watchdog to prevent reset
+ * Must be called regularly in the main loop and during long operations
+ */
+void feedWatchdog(void) {
+  esp_task_wdt_reset();
+}
+
+/**
+ * @brief Attempt to recover the I2C bus from a stuck state
+ * 
+ * This function generates clock pulses on SCL while SDA is high to
+ * clear any stuck slave device. This is a common I2C bus recovery technique.
+ * 
+ * @return true if recovery was successful (devices responding)
+ */
+bool recoverI2cBus(void) {
+  Serial.println(F("Attempting I2C bus recovery..."));
+  
+  // End current I2C session
+  Wire.end();
+  delay(10);
+  
+  // Configure pins as GPIO for manual control
+  pinMode(I2C_SDA, OUTPUT);
+  pinMode(I2C_SCL, OUTPUT);
+  
+  // Ensure SDA is high
+  digitalWrite(I2C_SDA, HIGH);
+  
+  // Generate clock pulses to release any stuck slave
+  for (int i = 0; i < I2C_BUS_RECOVERY_CLOCKS; i++) {
+    digitalWrite(I2C_SCL, LOW);
+    delayMicroseconds(5);
+    digitalWrite(I2C_SCL, HIGH);
+    delayMicroseconds(5);
   }
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  display.display();
+  
+  // Generate STOP condition (SDA low-to-high while SCL is high)
+  digitalWrite(I2C_SDA, LOW);
+  delayMicroseconds(5);
+  digitalWrite(I2C_SCL, HIGH);
+  delayMicroseconds(5);
+  digitalWrite(I2C_SDA, HIGH);
+  delayMicroseconds(5);
+  
+  // Reinitialize I2C
+  Wire.begin(I2C_SDA, I2C_SCL);
+  Wire.setClock(ICM_I2C_SPEED);
+  // ESP32 Arduino Wire uses setTimeOut (capital O)
+  Wire.setTimeOut(I2C_TIMEOUT_MS);
+  
+  delay(50);
+  
+  // Verify bus is working by scanning for devices
+  return checkI2cDevices();
+}
+
+/**
+ * @brief Check if I2C devices are responding
+ * Scans for OLED and IMU devices on the bus
+ * 
+ * @return true if at least one expected device responds
+ */
+bool checkI2cDevices(void) {
+  bool oledFound = false;
+  bool imuFound = false;
+  
+  // Check OLED (0x3C or 0x3D)
+  Wire.beginTransmission(OLED_I2C_ADDRESS);
+  if (Wire.endTransmission() == 0) {
+    oledFound = true;
+  }
+  
+  // Check IMU at 0x68 or 0x69
+  Wire.beginTransmission(0x68);
+  if (Wire.endTransmission() == 0) {
+    imuFound = true;
+  }
+  Wire.beginTransmission(0x69);
+  if (Wire.endTransmission() == 0) {
+    imuFound = true;
+  }
+  
+  Serial.printf("I2C scan: OLED=%s, IMU=%s\n", 
+                oledFound ? "OK" : "NOT FOUND",
+                imuFound ? "OK" : "NOT FOUND");
+  
+  return (oledFound || imuFound);
+}
+
+/**
+ * @brief Safely update the display with error handling
+ * 
+ * @return true if display update was successful
+ */
+bool safeDisplayUpdate(void) {
+  // Update display content first
+  updateDisplay();
+  
+  // The display.display() function doesn't return error status in Adafruit library
+  // but we can check if the I2C transaction was successful
+  Wire.beginTransmission(OLED_I2C_ADDRESS);
+  uint8_t error = Wire.endTransmission();
+  
+  if (error == 0) {
+    g_lastI2cSuccess = millis();
+    return true;
+  } else {
+    g_i2cErrorCount++;
+    if (g_i2cErrorCount % 10 == 0) {
+      Serial.printf("Display I2C error: %d (count: %d)\n", error, g_i2cErrorCount);
+    }
+    return false;
+  }
 }
 
 bool initIMU(void) {
@@ -675,25 +901,34 @@ void runFullCalibration(void) {
   // Wait for button press or timeout
   unsigned long startWait = millis();
   while (!wasButtonPressed() && (millis() - startWait < 10000)) {
+    feedWatchdog();
     updateButton();
     delay(10);
   }
+  
+  feedWatchdog();
   
   // Step 1: Gyroscope calibration
   showMsg("STEP 1/2", "GYROSCOPE", "Hold still!");
   delay(2000);
   runGyroCalibration();
   
+  feedWatchdog();
+  
   // Step 2: Magnetometer calibration
   showMsg("STEP 2/2", "MAGNETOMETER", "Rotate slowly");
   delay(2000);
   runMagCalibration();
+  
+  feedWatchdog();
   
   // Calculate final calibration values
   calculateMagCalibration();
   
   // Save to NVS
   saveCalibration();
+  
+  feedWatchdog();
   
   // Show results (max 21 chars per line)
   char line1[22], line2[22];
@@ -710,6 +945,7 @@ void runFullCalibration(void) {
   Serial.printf("Quality: %d%%\n", g_cal.quality);
   
   delay(3000);
+  feedWatchdog();
   
   g_calibrationMode = false;
   digitalWrite(LED_PIN, LOW);
@@ -726,12 +962,19 @@ void runGyroCalibration(void) {
   int validSamples = 0;
   
   for (int i = 0; i < GYRO_CAL_SAMPLES; i++) {
+    // Feed watchdog every 100 samples
+    if (i % 100 == 0) {
+      feedWatchdog();
+    }
+    
     if (imu.dataReady()) {
       imu.getAGMT();
-      gyroSum[0] += imu.agmt.gyr.axes.x;
-      gyroSum[1] += imu.agmt.gyr.axes.y;
-      gyroSum[2] += imu.agmt.gyr.axes.z;
-      validSamples++;
+      if (imu.status == ICM_20948_Stat_Ok) {
+        gyroSum[0] += imu.agmt.gyr.axes.x;
+        gyroSum[1] += imu.agmt.gyr.axes.y;
+        gyroSum[2] += imu.agmt.gyr.axes.z;
+        validSamples++;
+      }
     }
     
     // Update progress bar
@@ -770,11 +1013,18 @@ void runMagCalibration(void) {
   
   unsigned long startTime = millis();
   unsigned long lastUpdate = 0;
+  unsigned long lastWdtFeed = 0;
   bool complete = false;
   
   showCalibrationScreen("MAG CAL", "Rotate all dirs", "BTN=done", nullptr, 0);
   
   while (!complete && (millis() - startTime < MAG_CAL_MAX_TIME_MS)) {
+    // Feed watchdog regularly
+    if (millis() - lastWdtFeed >= 1000) {
+      feedWatchdog();
+      lastWdtFeed = millis();
+    }
+    
     // Check for button press to end early
     updateButton();
     if (wasButtonPressed() && (millis() - startTime > MAG_CAL_MIN_TIME_MS)) {
@@ -785,6 +1035,11 @@ void runMagCalibration(void) {
     // Read magnetometer
     if (imu.dataReady()) {
       imu.getAGMT();
+      
+      // Check IMU status
+      if (imu.status != ICM_20948_Stat_Ok) {
+        continue;  // Skip bad readings
+      }
       
       // Apply axis mapping for AK09916 magnetometer
       float mx = imu.magY();    // Swap and invert for proper orientation
@@ -852,6 +1107,8 @@ void runMagCalibration(void) {
     
     delay(10);
   }
+  
+  feedWatchdog();
   
   // Store min/max
   for (int i = 0; i < 3; i++) {
@@ -1102,20 +1359,58 @@ void processSensors(void) {
   McalXyz[1] = -McalXyz[1];
   McalXyz[2] = -McalXyz[2];
   
-  // Calculate delta time
+  // Calculate delta time with overflow protection
+  // micros() overflows every ~71 minutes, handle this gracefully
   unsigned long now = micros();
-  float deltat = (now - g_ahrs.lastUpdate) * 1.0e-6f;
+  unsigned long elapsed;
+  
+  // Handle micros() overflow (unsigned subtraction handles this correctly)
+  elapsed = now - g_ahrs.lastUpdate;
+  
+  // Validate elapsed time - if it seems unreasonable, use a safe default
+  // Maximum reasonable delta is ~100ms (10 updates/second)
+  if (elapsed > 100000UL) {
+    // Either overflow happened or we were stalled - use safe default
+    elapsed = 10000UL;  // 10ms default
+  }
+  
+  float deltat = elapsed * 1.0e-6f;
   g_ahrs.lastUpdate = now;
   
-  // Limit delta time to reasonable values for AHRS stability
-  // Max 20ms to prevent large integration errors
-  if (deltat > 0.02f) deltat = 0.02f;
-  if (deltat < 0.0001f) return;
+  // Additional safety check - ensure deltat is positive and reasonable
+  // Min 0.1ms to avoid division issues, max 20ms for AHRS stability
+  if (deltat < 0.0001f) {
+    deltat = 0.0001f;
+  } else if (deltat > 0.02f) {
+    deltat = 0.02f;
+  }
+  
+  // Check for NaN in gyro/accel/mag data (can cause AHRS instability)
+  if (isnan(Gxyz[0]) || isnan(Gxyz[1]) || isnan(Gxyz[2]) ||
+      isnan(Axyz[0]) || isnan(Axyz[1]) || isnan(Axyz[2]) ||
+      isnan(McalXyz[0]) || isnan(McalXyz[1]) || isnan(McalXyz[2])) {
+    return;  // Skip this update
+  }
   
   // Update Mahony AHRS
   MahonyQuaternionUpdate(Axyz[0], Axyz[1], Axyz[2],
                          Gxyz[0], Gxyz[1], Gxyz[2],
                          McalXyz[0], McalXyz[1], McalXyz[2], deltat);
+  
+  // Check quaternion validity after update
+  float qMag = sqrtf(g_ahrs.q[0]*g_ahrs.q[0] + g_ahrs.q[1]*g_ahrs.q[1] + 
+                     g_ahrs.q[2]*g_ahrs.q[2] + g_ahrs.q[3]*g_ahrs.q[3]);
+  if (isnan(qMag) || qMag < 0.9f || qMag > 1.1f) {
+    // Quaternion is invalid - reset to identity
+    g_ahrs.q[0] = 1.0f;
+    g_ahrs.q[1] = 0.0f;
+    g_ahrs.q[2] = 0.0f;
+    g_ahrs.q[3] = 0.0f;
+    g_ahrs.eInt[0] = g_ahrs.eInt[1] = g_ahrs.eInt[2] = 0.0f;
+    g_sensor.filtersReady = false;
+    Serial.println(F("AHRS quaternion reset due to invalid state"));
+    return;
+  }
   
   // Convert quaternion to Euler angles
   float yaw, pitch, roll;
