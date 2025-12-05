@@ -552,11 +552,33 @@ void loop() {
 /**
  * @brief Initialize and configure the watchdog timer
  * Provides automatic reset if the program hangs
+ * 
+ * Note: ESP-IDF v5.x changed the API - now requires esp_task_wdt_config_t structure
  */
 void initWatchdog(void) {
-  // Initialize Task Watchdog Timer (TWDT)
-  esp_task_wdt_init(WDT_TIMEOUT_SECONDS, true);  // true = panic on timeout (reset)
-  esp_task_wdt_add(NULL);  // Add current task to WDT
+  // Configure Task Watchdog Timer (TWDT) for ESP-IDF v5.x API
+  esp_task_wdt_config_t twdt_config = {
+    .timeout_ms = WDT_TIMEOUT_SECONDS * 1000,  // Convert seconds to milliseconds
+    .idle_core_mask = (1 << portNUM_PROCESSORS) - 1,  // Monitor all cores
+    .trigger_panic = true  // Panic on timeout (reset)
+  };
+  
+  // Deinitialize first in case WDT is already running (ignore error if not initialized)
+  esp_task_wdt_deinit();
+  
+  // Initialize Task Watchdog Timer with config structure
+  esp_err_t err = esp_task_wdt_init(&twdt_config);
+  if (err != ESP_OK) {
+    Serial.printf("Failed to initialize watchdog: %d\n", err);
+    return;
+  }
+  
+  err = esp_task_wdt_add(NULL);  // Add current task to WDT
+  if (err != ESP_OK) {
+    Serial.printf("Failed to add task to watchdog: %d\n", err);
+    return;
+  }
+  
   Serial.printf("Watchdog initialized with %ds timeout\n", WDT_TIMEOUT_SECONDS);
 }
 
