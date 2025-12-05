@@ -122,10 +122,12 @@
 #define MAG_CAL_MIN_RANGE     80.0f   // Minimum range for X/Y axes (μT)
 #define MAG_CAL_MIN_SAMPLES   300     // Minimum samples for good calibration
 #define MAG_UPDATE_INTERVAL   50      // ms between display updates
+#define MIN_SAMPLES_FOR_ELLIPSOID 100 // Minimum samples for ellipsoid fitting
 
 // Accelerometer calibration
 #define ACCEL_CAL_POSITIONS   6       // 6 positions for full calibration
 #define ACCEL_CAL_SAMPLES     200     // Samples per position
+#define ACCEL_SENSITIVITY_2G  16384.0f // LSB/g for ±2g range (from datasheet)
 
 // ============================================================================
 // FILTER PARAMETERS
@@ -1214,11 +1216,10 @@ bool checkFlatPlacement(void) {
       imu.getAGMT();
       
       if (imu.status == ICM_20948_Stat_Ok) {
-        // Normalize accelerometer readings (assuming ±2g range)
-        // 16384 LSB/g for ±2g range
-        float ax = imu.agmt.acc.axes.x / 16384.0f;
-        float ay = imu.agmt.acc.axes.y / 16384.0f;
-        float az = imu.agmt.acc.axes.z / 16384.0f;
+        // Normalize accelerometer readings (±2g range)
+        float ax = imu.agmt.acc.axes.x / ACCEL_SENSITIVITY_2G;
+        float ay = imu.agmt.acc.axes.y / ACCEL_SENSITIVITY_2G;
+        float az = imu.agmt.acc.axes.z / ACCEL_SENSITIVITY_2G;
         
         // Check if flat: |ax| < threshold, |ay| < threshold, az > GRAVITY_MIN
         bool isFlat = (fabsf(ax) < FLAT_THRESHOLD) && 
@@ -1234,7 +1235,7 @@ bool checkFlatPlacement(void) {
           unsigned long stableTime = millis() - stableStart;
           int progress = min(100, (int)(stableTime * 100 / STABLE_TIME_REQUIRED));
           
-          char line1[22];
+          char line1[MAX_CHARS_LINE + 1];
           snprintf(line1, sizeof(line1), "OK! %.1fs", stableTime / 1000.0f);
           showCalibrationScreen("FLAT CHECK", line1, "Trzymaj...", nullptr, progress);
           
@@ -1249,7 +1250,7 @@ bool checkFlatPlacement(void) {
           wasStable = false;
           
           // Show current readings for debugging
-          char line1[22], line2[22];
+          char line1[MAX_CHARS_LINE + 1], line2[MAX_CHARS_LINE + 1];
           snprintf(line1, sizeof(line1), "ax:%.2f ay:%.2f", ax, ay);
           snprintf(line2, sizeof(line2), "az:%.2f (%ds)", az, (int)((FLAT_CHECK_TIMEOUT - (millis() - startTime)) / 1000));
           showCalibrationScreen("FLAT CHECK", line1, line2, nullptr, -1);
@@ -1284,8 +1285,8 @@ bool calculateMagCalibration(void) {
   Serial.printf("Using %d samples\n", g_sampleCount);
   
   // Require minimum number of samples for ellipsoid fitting
-  if (g_sampleCount < 100) {
-    Serial.println(F("Not enough samples for ellipsoid fitting (need at least 100)"));
+  if (g_sampleCount < MIN_SAMPLES_FOR_ELLIPSOID) {
+    Serial.printf("Not enough samples for ellipsoid fitting (need at least %d)\n", MIN_SAMPLES_FOR_ELLIPSOID);
     Serial.printf("Only have %d samples\n", g_sampleCount);
     g_cal.isValid = false;
     g_cal.quality = 0;
