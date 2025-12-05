@@ -160,6 +160,8 @@
 #define MATRIX_EPSILON        1e-10f  // Threshold for singularity detection
 #define CHOLESKY_MIN_DIAG     0.001f  // Minimum diagonal value for Cholesky decomposition
 #define ELLIPSOID_FIT_MAX_RESIDUAL 50.0f  // Maximum residual (%) for successful fit
+#define EIGENVALUE_MIN_THRESHOLD 0.01f    // Minimum eigenvalue to avoid division by zero
+#define EIGENVALUE_FALLBACK   0.1f    // Fallback axis length when eigenvalue is too small
 
 // ============================================================================
 // BUTTON DEBOUNCE
@@ -1011,100 +1013,110 @@ void runFullCalibration(void) {
 }
 
 /**
- * @brief Gyroscope calibration with outlier rejection and robust averaging
+ * @brief Gyroscope calibration with outlier rejection using Welford's algorithm
  * 
- * This improved version:
- * 1. Collects samples in a buffer
- * 2. Sorts to find median (for outlier detection)
- * 3. Rejects samples > 2 standard deviations from median
- * 4. Averages remaining samples for offset
+ * This improved version uses a two-pass approach:
+ * 1. First pass: Calculate mean and standard deviation using Welford's online algorithm
+ * 2. Second pass: Collect only samples within 2 sigma of mean (outlier rejection)
+ * 
+ * This approach is memory-efficient and doesn't require large buffers.
  */
 void runGyroCalibration(void) {
   showCalibrationScreen("GYRO CAL", "Hold still!", nullptr, nullptr, 0);
   delay(1000);
   
-  // Use smaller buffer for faster calibration with outlier rejection
-  const int BUFFER_SIZE = 500;  // 500 samples at 2ms = ~1s
-  static float gyroBuffer[3][BUFFER_SIZE];
-  int validSamples = 0;
+  // First pass: Calculate mean and variance using Welford's algorithm (memory efficient)
+  float mean[3] = {0, 0, 0};
+  float M2[3] = {0, 0, 0};  // Sum of squared differences
+  int n = 0;
   
-  // Collect samples
-  for (int i = 0; i < GYRO_CAL_SAMPLES && validSamples < BUFFER_SIZE; i++) {
-    // Feed watchdog every 100 samples
-    if (i % 100 == 0) {
+  const int FIRST_PASS_SAMPLES = 300;  // Reduced samples for first pass
+  
+  for (int i = 0; i < FIRST_PASS_SAMPLES; i++) {
+    if (i % 50 == 0) {
       feedWatchdog();
+      int progress = (i * 50) / FIRST_PASS_SAMPLES;  // 0-50% for first pass
+      showCalibrationScreen("GYRO CAL", "Analyzing...", nullptr, nullptr, progress);
     }
     
     if (imu.dataReady()) {
       imu.getAGMT();
       if (imu.status == ICM_20948_Stat_Ok) {
-        gyroBuffer[0][validSamples] = imu.agmt.gyr.axes.x;
-        gyroBuffer[1][validSamples] = imu.agmt.gyr.axes.y;
-        gyroBuffer[2][validSamples] = imu.agmt.gyr.axes.z;
-        validSamples++;
+        n++;
+        float values[3] = {
+          (float)imu.agmt.gyr.axes.x,
+          (float)imu.agmt.gyr.axes.y,
+          (float)imu.agmt.gyr.axes.z
+        };
+        
+        // Welford's online algorithm for mean and variance
+        for (int axis = 0; axis < 3; axis++) {
+          float delta = values[axis] - mean[axis];
+          mean[axis] += delta / n;
+          float delta2 = values[axis] - mean[axis];
+          M2[axis] += delta * delta2;
+        }
       }
     }
-    
-    // Update progress bar
-    if (i % 50 == 0) {
-      int progress = (i * 100) / GYRO_CAL_SAMPLES;
-      showCalibrationScreen("GYRO CAL", "Hold still!", nullptr, nullptr, progress);
-    }
-    
-    delay(2);  // ~500Hz sample rate
+    delay(2);
   }
   
-  if (validSamples < 50) {
-    Serial.println(F("Not enough gyro samples collected!"));
-    return;
-  }
-  
-  // Calculate mean and standard deviation for outlier rejection
-  float mean[3] = {0, 0, 0};
-  float stddev[3] = {0, 0, 0};
-  
-  // First pass: calculate mean
+  // Calculate standard deviation
+  float stddev[3];
   for (int axis = 0; axis < 3; axis++) {
-    for (int i = 0; i < validSamples; i++) {
-      mean[axis] += gyroBuffer[axis][i];
-    }
-    mean[axis] /= validSamples;
+    stddev[axis] = (n > 1) ? sqrtf(M2[axis] / (n - 1)) : 0;
   }
   
-  // Second pass: calculate standard deviation
-  for (int axis = 0; axis < 3; axis++) {
-    for (int i = 0; i < validSamples; i++) {
-      float diff = gyroBuffer[axis][i] - mean[axis];
-      stddev[axis] += diff * diff;
-    }
-    stddev[axis] = sqrtf(stddev[axis] / validSamples);
-  }
-  
-  // Third pass: calculate trimmed mean (reject outliers > 2 sigma)
+  // Second pass: Collect trimmed mean (reject outliers > 2 sigma)
+  const float OUTLIER_THRESHOLD = 2.0f;
   float trimmedSum[3] = {0, 0, 0};
   int trimmedCount[3] = {0, 0, 0};
-  const float OUTLIER_THRESHOLD = 2.0f;  // 2 standard deviations
   
-  for (int axis = 0; axis < 3; axis++) {
-    for (int i = 0; i < validSamples; i++) {
-      float diff = fabsf(gyroBuffer[axis][i] - mean[axis]);
-      if (diff < OUTLIER_THRESHOLD * stddev[axis]) {
-        trimmedSum[axis] += gyroBuffer[axis][i];
-        trimmedCount[axis]++;
-      }
+  const int SECOND_PASS_SAMPLES = 500;
+  
+  for (int i = 0; i < SECOND_PASS_SAMPLES; i++) {
+    if (i % 50 == 0) {
+      feedWatchdog();
+      int progress = 50 + (i * 50) / SECOND_PASS_SAMPLES;  // 50-100% for second pass
+      showCalibrationScreen("GYRO CAL", "Calibrating...", nullptr, nullptr, progress);
     }
     
+    if (imu.dataReady()) {
+      imu.getAGMT();
+      if (imu.status == ICM_20948_Stat_Ok) {
+        float values[3] = {
+          (float)imu.agmt.gyr.axes.x,
+          (float)imu.agmt.gyr.axes.y,
+          (float)imu.agmt.gyr.axes.z
+        };
+        
+        // Add to trimmed sum if within threshold
+        for (int axis = 0; axis < 3; axis++) {
+          float diff = fabsf(values[axis] - mean[axis]);
+          if (diff < OUTLIER_THRESHOLD * stddev[axis] || stddev[axis] < 0.1f) {
+            trimmedSum[axis] += values[axis];
+            trimmedCount[axis]++;
+          }
+        }
+      }
+    }
+    delay(2);
+  }
+  
+  // Calculate final offset from trimmed mean
+  for (int axis = 0; axis < 3; axis++) {
     if (trimmedCount[axis] > 0) {
       g_cal.gyroOffset[axis] = trimmedSum[axis] / trimmedCount[axis];
     } else {
-      g_cal.gyroOffset[axis] = mean[axis];  // Fallback to regular mean
+      g_cal.gyroOffset[axis] = mean[axis];  // Fallback to first-pass mean
     }
   }
   
-  int rejected = validSamples - (trimmedCount[0] + trimmedCount[1] + trimmedCount[2]) / 3;
-  Serial.printf("Gyro offset: [%.2f, %.2f, %.2f] from %d samples (%d outliers rejected)\n",
+  int avgTrimmedCount = (trimmedCount[0] + trimmedCount[1] + trimmedCount[2]) / 3;
+  int rejected = SECOND_PASS_SAMPLES - avgTrimmedCount;
+  Serial.printf("Gyro offset: [%.2f, %.2f, %.2f] from %d+%d samples (~%d outliers/axis rejected)\n",
                 g_cal.gyroOffset[0], g_cal.gyroOffset[1], g_cal.gyroOffset[2], 
-                validSamples, rejected);
+                FIRST_PASS_SAMPLES, SECOND_PASS_SAMPLES, rejected);
   Serial.printf("Gyro stddev: [%.2f, %.2f, %.2f]\n", stddev[0], stddev[1], stddev[2]);
   
   showCalibrationScreen("GYRO CAL", "Done!", nullptr, nullptr, 100);
@@ -1483,12 +1495,12 @@ void applyMagCalibration(float raw[3], float calibrated[3]) {
 void applyAccelCalibration(float raw[3], float calibrated[3]) {
   float temp[3];
   
-  // Step 1: Subtract hard iron bias (offset)
+  // Step 1: Subtract accelerometer offset bias
   for (int i = 0; i < 3; i++) {
     temp[i] = raw[i] - g_cal.accelBias[i];
   }
   
-  // Step 2: Apply soft iron correction matrix (3x3 multiplication)
+  // Step 2: Apply scale/misalignment correction matrix (3x3 multiplication)
   // calibrated = A_inv * temp
   for (int i = 0; i < 3; i++) {
     calibrated[i] = g_cal.accelAinv[i][0] * temp[0] + 
@@ -2186,8 +2198,15 @@ void jacobi3x3(float A[3][3], float V[3][3], float eigenvalues[3]) {
     // Check convergence
     if (maxVal < EPSILON) break;
     
-    // Compute rotation angle
-    float theta = 0.5f * atan2f(2.0f * A[p][q], A[q][q] - A[p][p]);
+    // Compute rotation angle with numerical stability check
+    float theta;
+    float diagDiff = A[q][q] - A[p][p];
+    if (fabsf(diagDiff) < 1e-12f) {
+      // When diagonal elements are nearly equal, use 45 degrees
+      theta = (A[p][q] > 0) ? M_PI / 4.0f : -M_PI / 4.0f;
+    } else {
+      theta = 0.5f * atan2f(2.0f * A[p][q], diagDiff);
+    }
     float c = cosf(theta);
     float s = sinf(theta);
     
@@ -2356,7 +2375,7 @@ bool ellipsoidFit(float samples[][3], int n, float Ainv[3][3], float bias[3], fl
   // Convert eigenvalues to axis lengths (sqrt of eigenvalues for covariance)
   float axisLengths[3];
   for (int i = 0; i < 3; i++) {
-    axisLengths[i] = (eigval[i] > 0.01f) ? sqrtf(eigval[i]) : 0.1f;
+    axisLengths[i] = (eigval[i] > EIGENVALUE_MIN_THRESHOLD) ? sqrtf(eigval[i]) : EIGENVALUE_FALLBACK;
   }
   
   // Average radius for normalization
