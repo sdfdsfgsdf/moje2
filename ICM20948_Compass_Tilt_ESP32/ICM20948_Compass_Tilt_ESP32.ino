@@ -195,8 +195,9 @@ struct SensorData {
  * Based on:
  * - jremington/ICM_20948-AHRS calibration format
  * - Sailboat Instruments ellipsoid fitting (Li's algorithm)
- * - Cave Pearl Project min/max method (as fallback)
  * - IOP Science paper: DOI 10.1088/1755-1315/237/3/032015
+ * 
+ * Note: Only ellipsoid fitting calibration is used. The min/max fallback has been removed.
  * 
  * Calibrated reading = A_inv * (raw - B)
  */
@@ -304,11 +305,11 @@ void clearCalibration(void);
 void runFullCalibration(void);
 void runGyroCalibration(void);
 void runMagCalibration(void);
-void calculateMagCalibration(void);
-void calculateMagCalibrationEllipsoid(void);
-void calculateMagCalibrationMinMax(void);
+bool calculateMagCalibration(void);
+bool calculateMagCalibrationEllipsoid(void);
 void applyMagCalibration(float raw[3], float calibrated[3]);
 void initDefaultCalibration(void);
+bool checkFlatPlacement(void);
 
 // Ellipsoid fitting (Li's algorithm)
 // Based on: https://sailboatinstruments.blogspot.com/2011/09/improved-magnetometer-calibration-part.html
@@ -930,41 +931,67 @@ void runFullCalibration(void) {
   
   feedWatchdog();
   
-  // Step 1: Gyroscope calibration
-  showMsg("STEP 1/2", "GYROSCOPE", "Hold still!");
+  // Step 1: Flat placement check
+  showMsg("STEP 1/3", "Ustaw czujnik", "plasko (chip up)");
+  delay(2000);
+  
+  if (!checkFlatPlacement()) {
+    showMsg("CAL FAILED!", "Sensor not flat", "Try again");
+    Serial.println(F("Calibration aborted: sensor not flat"));
+    delay(3000);
+    g_calibrationMode = false;
+    digitalWrite(LED_PIN, LOW);
+    return;
+  }
+  
+  feedWatchdog();
+  
+  // Step 2: Gyroscope calibration
+  showMsg("STEP 2/3", "GYROSCOPE", "Hold still!");
   delay(2000);
   runGyroCalibration();
   
   feedWatchdog();
   
-  // Step 2: Magnetometer calibration
-  showMsg("STEP 2/2", "MAGNETOMETER", "Rotate slowly");
+  // Step 3: Magnetometer calibration
+  showMsg("STEP 3/3", "MAGNETOMETER", "Rotate slowly");
   delay(2000);
   runMagCalibration();
   
   feedWatchdog();
   
   // Calculate final calibration values
-  calculateMagCalibration();
+  bool calSuccess = calculateMagCalibration();
   
-  // Save to NVS
-  saveCalibration();
-  
-  feedWatchdog();
-  
-  // Show results (max 21 chars per line)
-  char line1[22], line2[22];
-  snprintf(line1, sizeof(line1), "Quality: %d%%", g_cal.quality);
-  // Truncate range values to fit display
-  int rx = (int)(g_cal.magMax[0] - g_cal.magMin[0]);
-  int ry = (int)(g_cal.magMax[1] - g_cal.magMin[1]);
-  int rz = (int)(g_cal.magMax[2] - g_cal.magMin[2]);
-  snprintf(line2, sizeof(line2), "%d/%d/%d", rx, ry, rz);
-  
-  showMsg("CAL OK! Saved", line1, line2);
-  
-  Serial.println(F("Calibration complete!"));
-  Serial.printf("Quality: %d%%\n", g_cal.quality);
+  if (calSuccess) {
+    // Save to NVS only if calibration succeeded
+    saveCalibration();
+    
+    feedWatchdog();
+    
+    // Show results (max 21 chars per line)
+    char line1[22], line2[22];
+    snprintf(line1, sizeof(line1), "Quality: %d%%", g_cal.quality);
+    // Truncate range values to fit display
+    int rx = (int)(g_cal.magMax[0] - g_cal.magMin[0]);
+    int ry = (int)(g_cal.magMax[1] - g_cal.magMin[1]);
+    int rz = (int)(g_cal.magMax[2] - g_cal.magMin[2]);
+    snprintf(line2, sizeof(line2), "%d/%d/%d", rx, ry, rz);
+    
+    showMsg("CAL OK! Saved", line1, line2);
+    
+    Serial.println(F("Calibration complete!"));
+    Serial.printf("Quality: %d%%\n", g_cal.quality);
+  } else {
+    // Calibration failed
+    showMsg("CAL FAILED!", "Ellipsoid fail", "Try again");
+    Serial.println(F("Calibration failed: ellipsoid fitting unsuccessful"));
+    
+    // Mark calibration as invalid
+    g_cal.isValid = false;
+    g_cal.quality = 0;
+    g_cal.useEllipsoidFit = false;
+  }
   
   delay(3000);
   feedWatchdog();
@@ -1148,29 +1175,126 @@ void runMagCalibration(void) {
 }
 
 /**
+ * @brief Check if sensor is placed flat with chip facing up (bottom down)
+ * 
+ * Uses accelerometer data to verify flat placement:
+ * - |ax| and |ay| should be below a small threshold (near zero tilt)
+ * - az should be near +1g (chip up orientation)
+ * 
+ * The function provides visual feedback and allows retry/timeout.
+ * 
+ * @return true if flat placement confirmed, false if timeout/failed
+ */
+bool checkFlatPlacement(void) {
+  const float FLAT_THRESHOLD = 0.15f;  // Max allowed tilt (|ax|, |ay| threshold)
+  const float GRAVITY_MIN = 0.85f;     // Min az value for "chip up" (near 1g)
+  const unsigned long FLAT_CHECK_TIMEOUT = 30000;  // 30 seconds timeout
+  const unsigned long STABLE_TIME_REQUIRED = 1500; // 1.5 seconds of stable flat position
+  
+  Serial.println(F("Checking flat placement (chip up)..."));
+  showCalibrationScreen("FLAT CHECK", "Ustaw plasko", "Chip gora", nullptr, 0);
+  delay(1000);
+  
+  unsigned long startTime = millis();
+  unsigned long stableStart = 0;
+  bool wasStable = false;
+  
+  while (millis() - startTime < FLAT_CHECK_TIMEOUT) {
+    feedWatchdog();
+    
+    // Check for button press to skip (emergency exit)
+    updateButton();
+    if (wasButtonPressed()) {
+      Serial.println(F("Flat check skipped by user"));
+      return true;  // Allow user to skip if they're confident
+    }
+    
+    // Read accelerometer
+    if (imu.dataReady()) {
+      imu.getAGMT();
+      
+      if (imu.status == ICM_20948_Stat_Ok) {
+        // Normalize accelerometer readings (assuming ±2g range)
+        // 16384 LSB/g for ±2g range
+        float ax = imu.agmt.acc.axes.x / 16384.0f;
+        float ay = imu.agmt.acc.axes.y / 16384.0f;
+        float az = imu.agmt.acc.axes.z / 16384.0f;
+        
+        // Check if flat: |ax| < threshold, |ay| < threshold, az > GRAVITY_MIN
+        bool isFlat = (fabsf(ax) < FLAT_THRESHOLD) && 
+                      (fabsf(ay) < FLAT_THRESHOLD) && 
+                      (az > GRAVITY_MIN);
+        
+        if (isFlat) {
+          if (!wasStable) {
+            stableStart = millis();
+            wasStable = true;
+          }
+          
+          unsigned long stableTime = millis() - stableStart;
+          int progress = min(100, (int)(stableTime * 100 / STABLE_TIME_REQUIRED));
+          
+          char line1[22];
+          snprintf(line1, sizeof(line1), "OK! %.1fs", stableTime / 1000.0f);
+          showCalibrationScreen("FLAT CHECK", line1, "Trzymaj...", nullptr, progress);
+          
+          if (stableTime >= STABLE_TIME_REQUIRED) {
+            Serial.println(F("Flat placement confirmed!"));
+            Serial.printf("  ax=%.3f, ay=%.3f, az=%.3f\n", ax, ay, az);
+            showCalibrationScreen("FLAT CHECK", "OK!", nullptr, nullptr, 100);
+            delay(500);
+            return true;
+          }
+        } else {
+          wasStable = false;
+          
+          // Show current readings for debugging
+          char line1[22], line2[22];
+          snprintf(line1, sizeof(line1), "ax:%.2f ay:%.2f", ax, ay);
+          snprintf(line2, sizeof(line2), "az:%.2f (%ds)", az, (int)((FLAT_CHECK_TIMEOUT - (millis() - startTime)) / 1000));
+          showCalibrationScreen("FLAT CHECK", line1, line2, nullptr, -1);
+        }
+      }
+    }
+    
+    delay(50);
+  }
+  
+  Serial.println(F("Flat placement check timeout!"));
+  return false;
+}
+
+/**
  * @brief Calculate calibration parameters using collected samples
  * 
- * This function attempts ellipsoid fitting first (for best accuracy).
- * If ellipsoid fitting fails or doesn't converge, falls back to min/max method.
+ * This function uses ellipsoid fitting for calibration.
+ * If ellipsoid fitting fails or there are insufficient samples, calibration fails.
+ * 
+ * Note: Min/max fallback has been removed - only ellipsoid fitting is used.
  * 
  * Based on:
  * - Sailboat Instruments: Li's ellipsoid specific fitting algorithm
  * - jremington/ICM_20948-AHRS calibrate3.py
- * - Cave Pearl Project min/max method (fallback)
  * - IOP Science: DOI 10.1088/1755-1315/237/3/032015
+ * 
+ * @return true if calibration succeeded, false otherwise
  */
-void calculateMagCalibration(void) {
+bool calculateMagCalibration(void) {
   Serial.println(F("\n=== Calculating Magnetometer Calibration ==="));
   Serial.printf("Using %d samples\n", g_sampleCount);
   
-  // Try ellipsoid fitting first if we have enough samples
-  if (g_sampleCount >= 100) {
-    Serial.println(F("Attempting ellipsoid fitting (Li's algorithm)..."));
-    calculateMagCalibrationEllipsoid();
-  } else {
-    Serial.println(F("Not enough samples for ellipsoid fitting, using min/max method"));
-    calculateMagCalibrationMinMax();
+  // Require minimum number of samples for ellipsoid fitting
+  if (g_sampleCount < 100) {
+    Serial.println(F("Not enough samples for ellipsoid fitting (need at least 100)"));
+    Serial.printf("Only have %d samples\n", g_sampleCount);
+    g_cal.isValid = false;
+    g_cal.quality = 0;
+    g_cal.useEllipsoidFit = false;
+    return false;
   }
+  
+  Serial.println(F("Attempting ellipsoid fitting (Li's algorithm)..."));
+  return calculateMagCalibrationEllipsoid();
 }
 
 /**
@@ -1185,8 +1309,10 @@ void calculateMagCalibration(void) {
  * The algorithm fits an ellipsoid to the magnetometer data and calculates:
  * - Hard iron bias (B): offset vector to subtract
  * - Soft iron matrix (A_inv): 3x3 transformation matrix
+ * 
+ * @return true if fitting succeeded, false otherwise
  */
-void calculateMagCalibrationEllipsoid(void) {
+bool calculateMagCalibrationEllipsoid(void) {
   // We'll implement a simplified version of Li's algorithm
   // that works well on embedded systems
   
@@ -1205,6 +1331,7 @@ void calculateMagCalibrationEllipsoid(void) {
       }
     }
     g_cal.useEllipsoidFit = true;
+    g_cal.isValid = true;
     
     Serial.println(F("Ellipsoid fitting successful!"));
     Serial.printf("  Residual: %.4f\n", residual);
@@ -1219,65 +1346,18 @@ void calculateMagCalibrationEllipsoid(void) {
     float qualityFromResidual = max(0.0f, 100.0f - residual * 10.0f);
     g_cal.quality = (uint8_t)min(100.0f, qualityFromResidual);
     
+    return true;
   } else {
-    Serial.println(F("Ellipsoid fitting failed, falling back to min/max method"));
-    calculateMagCalibrationMinMax();
+    Serial.println(F("Ellipsoid fitting failed!"));
+    Serial.printf("  Residual: %.4f (threshold: %.1f)\n", residual, ELLIPSOID_FIT_MAX_RESIDUAL);
+    
+    // Mark calibration as invalid
+    g_cal.isValid = false;
+    g_cal.quality = 0;
+    g_cal.useEllipsoidFit = false;
+    
+    return false;
   }
-}
-
-/**
- * @brief Simple min/max calibration (Cave Pearl Project method)
- * 
- * This is the fallback method when ellipsoid fitting fails.
- * It calculates:
- * - Hard iron: offset = (max + min) / 2
- * - Soft iron: scale = avgDelta / delta (stored as diagonal matrix)
- */
-void calculateMagCalibrationMinMax(void) {
-  float delta[3];
-  
-  // Calculate Hard Iron offsets (center of min/max range)
-  for (int i = 0; i < 3; i++) {
-    g_cal.magBias[i] = (g_cal.magMax[i] + g_cal.magMin[i]) * 0.5f;
-    delta[i] = g_cal.magMax[i] - g_cal.magMin[i];
-  }
-  
-  // Calculate average diameter (for ideal sphere)
-  float avgDelta = (delta[0] + delta[1] + delta[2]) / 3.0f;
-  
-  // Initialize A_inv as identity matrix with scaling on diagonal
-  for (int i = 0; i < 3; i++) {
-    for (int j = 0; j < 3; j++) {
-      if (i == j) {
-        // Diagonal: scale factor
-        g_cal.magAinv[i][j] = (delta[i] > 1.0f) ? (avgDelta / delta[i]) : 1.0f;
-      } else {
-        // Off-diagonal: zero (no cross-axis correction)
-        g_cal.magAinv[i][j] = 0.0f;
-      }
-    }
-  }
-  
-  g_cal.useEllipsoidFit = false;
-  
-  // Calculate quality score
-  float rangeScore = 0;
-  if (delta[0] >= MAG_CAL_MIN_RANGE) rangeScore += 33;
-  if (delta[1] >= MAG_CAL_MIN_RANGE) rangeScore += 33;
-  if (delta[2] >= MAG_CAL_MIN_RANGE * 0.5f) rangeScore += 34;
-  
-  float minDelta = min(delta[0], min(delta[1], delta[2]));
-  float maxDelta = max(delta[0], max(delta[1], delta[2]));
-  float sphericity = (maxDelta > 0) ? (minDelta / maxDelta) * 100 : 0;
-  
-  g_cal.quality = (uint8_t)((rangeScore + sphericity) / 2);
-  
-  Serial.println(F("Min/Max calibration calculated:"));
-  Serial.printf("  Bias: [%.2f, %.2f, %.2f]\n", 
-                g_cal.magBias[0], g_cal.magBias[1], g_cal.magBias[2]);
-  Serial.printf("  Scale (diagonal): [%.4f, %.4f, %.4f]\n",
-                g_cal.magAinv[0][0], g_cal.magAinv[1][1], g_cal.magAinv[2][2]);
-  Serial.printf("  Quality: %d%%\n", g_cal.quality);
 }
 
 /**
