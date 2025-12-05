@@ -34,6 +34,7 @@
  */
 
 #include <Wire.h>
+#include <SPI.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <Preferences.h>
@@ -44,18 +45,25 @@
 // ESP32-WROOM-32D PIN CONFIGURATION
 // ============================================================================
 
-// I2C Pins (default ESP32)
+// I2C Pins for OLED display (default ESP32)
 #define I2C_SDA           21
 #define I2C_SCL           22
+
+// SPI Pins for ICM-20948 (using default VSPI on ESP32)
+#define SPI_MOSI          23    // VSPI MOSI (Master Out Slave In)
+#define SPI_MISO          19    // VSPI MISO (Master In Slave Out)
+#define SPI_SCK           18    // VSPI CLK (Clock)
+#define IMU_CS_PIN        5     // Chip Select for ICM-20948
+#define IMU_INT_PIN       4     // Optional: Interrupt pin from ICM-20948
 
 // Calibration Button (active LOW with internal pullup)
 #define BUTTON_PIN        15
 
 // Optional: LED indicator for calibration status
-#define LED_PIN           2    // Built-in LED on most ESP32 boards
+#define LED_PIN           2     // Built-in LED on most ESP32 boards
 
 // ============================================================================
-// DISPLAY CONFIGURATION
+// DISPLAY CONFIGURATION (OLED via I2C)
 // ============================================================================
 
 #define SCREEN_WIDTH      128
@@ -66,14 +74,13 @@
 #define MAX_CHARS_LINE    (SCREEN_WIDTH / CHAR_WIDTH)  // 21 chars per line
 
 // ============================================================================
-// ICM-20948 CONFIGURATION
+// ICM-20948 SPI CONFIGURATION
 // ============================================================================
 
-#define ICM_AD0_VAL       1    // AD0 pin state (0 = GND = 0x68, 1 = VCC = 0x69)
-#define ICM_I2C_SPEED     400000
+#define SPI_SPEED         4000000  // 4 MHz SPI clock (ICM-20948 supports up to 7 MHz)
 
 // ============================================================================
-// I2C STABILITY CONFIGURATION
+// I2C STABILITY CONFIGURATION (for OLED display)
 // ============================================================================
 
 #define I2C_RETRY_COUNT       3       // Number of retries for I2C operations
@@ -172,7 +179,7 @@
 // ============================================================================
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
-ICM_20948_I2C    imu;
+ICM_20948_SPI    imu;        // SPI interface for ICM-20948
 Preferences      preferences;
 
 // ============================================================================
@@ -377,14 +384,18 @@ void setup() {
   Serial.begin(115200);
   delay(100);
   
-  Serial.println(F("\n=== ICM20948 Compass ESP32 ==="));
+  Serial.println(F("\n=== ICM20948 Compass ESP32 (SPI) ==="));
   Serial.println(F("Initializing..."));
   
-  // Initialize I2C with ESP32 pins
+  // Initialize I2C for OLED display
   Wire.begin(I2C_SDA, I2C_SCL);
-  Wire.setClock(ICM_I2C_SPEED);
-  // ESP32 Arduino Wire uses setTimeOut (capital O), different from standard Arduino setTimeout
-  Wire.setTimeOut(I2C_TIMEOUT_MS);  // Set I2C timeout in milliseconds
+  Wire.setClock(400000);  // 400kHz for OLED
+  Wire.setTimeOut(I2C_TIMEOUT_MS);
+  
+  // Initialize SPI for IMU
+  SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI, IMU_CS_PIN);
+  pinMode(IMU_CS_PIN, OUTPUT);
+  digitalWrite(IMU_CS_PIN, HIGH);  // Deselect IMU initially
   
   // Initialize button
   initButton();
@@ -396,14 +407,11 @@ void setup() {
   // Initialize watchdog timer for stability
   initWatchdog();
   
-  // Check I2C bus and recover if needed
+  // Check I2C bus for OLED
   if (!checkI2cDevices()) {
-    Serial.println(F("I2C devices not found, attempting bus recovery..."));
+    Serial.println(F("OLED not found on I2C, attempting bus recovery..."));
     recoverI2cBus();
     delay(100);
-    if (!checkI2cDevices()) {
-      Serial.println(F("I2C bus recovery failed!"));
-    }
   }
   
   // Initialize display with retry
@@ -425,27 +433,27 @@ void setup() {
     display.setTextSize(1);
     display.setTextColor(SSD1306_WHITE);
     safeDisplayUpdate();
-    showMsg("ICM20948 Compass", "ESP32", "Init...");
+    showMsg("ICM20948 Compass", "ESP32 SPI", "Init...");
   }
   delay(500);
   
   feedWatchdog();
   
-  // Initialize IMU with retry
+  // Initialize IMU via SPI with retry
   bool imuOk = false;
-  for (int retry = 0; retry < I2C_RETRY_COUNT && !imuOk; retry++) {
+  for (int retry = 0; retry < 3 && !imuOk; retry++) {
     feedWatchdog();
     imuOk = initIMU();
     if (!imuOk) {
-      Serial.printf("IMU init attempt %d failed\n", retry + 1);
-      recoverI2cBus();
+      Serial.printf("IMU SPI init attempt %d failed\n", retry + 1);
       delay(200);
     }
   }
   
   if (!imuOk) {
-    showMsg("ERROR!", "IMU not found", "SDA:21 SCL:22");
-    Serial.println(F("ERROR: IMU initialization failed!"));
+    showMsg("ERROR!", "IMU not found", "Check SPI wiring");
+    Serial.println(F("ERROR: IMU SPI initialization failed!"));
+    Serial.println(F("Check: MOSI:23 MISO:19 SCK:18 CS:5"));
     // Blink LED but don't hang forever - watchdog will reset if needed
     unsigned long errorStart = millis();
     while (millis() - errorStart < 30000) {  // 30s timeout instead of infinite
@@ -458,7 +466,7 @@ void setup() {
   
   feedWatchdog();
   configureIMU();
-  Serial.println(F("IMU initialized successfully"));
+  Serial.println(F("IMU initialized successfully via SPI"));
   
   // Load saved calibration
   loadCalibration();
@@ -510,32 +518,27 @@ void loop() {
     g_sensor.filtersReady = false;  // Reset filters
   }
   
-  // Check for I2C bus health - recover if no successful communication for too long
-  if (millis() - g_lastI2cSuccess > 5000) {
-    Serial.println(F("I2C timeout - attempting bus recovery"));
+  // Check for I2C bus health (OLED only) - recover if no successful communication for too long
+  if (millis() - g_lastI2cSuccess > 10000) {
+    Serial.println(F("OLED I2C timeout - attempting bus recovery"));
     g_i2cError = true;
     if (recoverI2cBus()) {
       g_lastI2cSuccess = millis();
       g_i2cError = false;
-      Serial.println(F("I2C bus recovered"));
-    } else {
-      Serial.println(F("I2C recovery failed - restarting..."));
-      delay(100);
-      ESP.restart();
+      Serial.println(F("I2C bus recovered for OLED"));
     }
+    // Don't restart for OLED issues - system can work without display
   }
   
-  // Normal operation - read sensors and update display
+  // Normal operation - read sensors via SPI and update display
   if (imu.dataReady()) {
     imu.getAGMT();
     if (imu.status == ICM_20948_Stat_Ok) {
-      g_lastI2cSuccess = millis();
-      g_i2cError = false;
       processSensors();
     } else {
-      g_i2cErrorCount++;
+      g_i2cErrorCount++;  // Reusing counter for SPI errors
       if (g_i2cErrorCount % 100 == 0) {
-        Serial.printf("I2C errors: %d\n", g_i2cErrorCount);
+        Serial.printf("SPI read errors: %d\n", g_i2cErrorCount);
       }
     }
   }
@@ -654,9 +657,14 @@ bool recoverI2cBus(void) {
  * 
  * @return true if IMU is found (IMU is critical for operation), OLED is optional
  */
+/**
+ * @brief Check if I2C devices (OLED) are responding
+ * Note: IMU is now on SPI, so we only check OLED on I2C
+ * 
+ * @return true if OLED is found on I2C bus
+ */
 bool checkI2cDevices(void) {
   bool oledFound = false;
-  bool imuFound = false;
   
   // Check OLED (0x3C or 0x3D)
   Wire.beginTransmission(OLED_I2C_ADDRESS);
@@ -664,23 +672,20 @@ bool checkI2cDevices(void) {
     oledFound = true;
   }
   
-  // Check IMU at 0x68 or 0x69
-  Wire.beginTransmission(0x68);
-  if (Wire.endTransmission() == 0) {
-    imuFound = true;
-  }
-  Wire.beginTransmission(0x69);
-  if (Wire.endTransmission() == 0) {
-    imuFound = true;
+  // Also try alternate OLED address
+  if (!oledFound) {
+    Wire.beginTransmission(0x3D);
+    if (Wire.endTransmission() == 0) {
+      oledFound = true;
+    }
   }
   
-  Serial.printf("I2C scan: OLED=%s, IMU=%s\n", 
-                oledFound ? "OK" : "NOT FOUND",
-                imuFound ? "OK" : "NOT FOUND");
+  Serial.printf("I2C scan: OLED=%s (IMU is on SPI)\n", 
+                oledFound ? "OK" : "NOT FOUND");
   
-  // IMU is critical - must be present for system to operate
-  // OLED is optional (system can work without display)
-  return imuFound;
+  // OLED is optional - system can work without display
+  // IMU is checked separately via SPI
+  return oledFound;
 }
 
 /**
@@ -710,22 +715,18 @@ bool safeDisplayUpdate(void) {
 }
 
 bool initIMU(void) {
-  // Try primary address first
-  imu.begin(Wire, ICM_AD0_VAL);
+  // Initialize IMU via SPI
+  // The SparkFun library uses begin() with SPI port and CS pin
+  imu.begin(SPI, IMU_CS_PIN);
+  
   if (imu.status == ICM_20948_Stat_Ok) {
-    Serial.print(F("IMU found at address 0x"));
-    Serial.println(ICM_AD0_VAL ? 0x69 : 0x68, HEX);
+    Serial.println(F("IMU found on SPI bus"));
+    Serial.printf("  CS: GPIO%d, SCK: GPIO%d, MISO: GPIO%d, MOSI: GPIO%d\n", 
+                  IMU_CS_PIN, SPI_SCK, SPI_MISO, SPI_MOSI);
     return true;
   }
   
-  // Try alternate address
-  imu.begin(Wire, !ICM_AD0_VAL);
-  if (imu.status == ICM_20948_Stat_Ok) {
-    Serial.print(F("IMU found at address 0x"));
-    Serial.println(!ICM_AD0_VAL ? 0x69 : 0x68, HEX);
-    return true;
-  }
-  
+  Serial.printf("IMU SPI init failed with status: %d\n", imu.status);
   return false;
 }
 
