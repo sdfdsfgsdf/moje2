@@ -41,6 +41,14 @@ Projekt do pomiaru pochylenia i wskazywania północy magnetycznej oraz geografi
 - ✅ Wyświetlacz OLED 128x32 z kompaktowym UI
 - ✅ Aktualizacja wyświetlacza 10Hz
 
+### Stabilność i niezawodność
+- ✅ **Watchdog Timer** - automatyczny restart przy zawieszeniu programu
+- ✅ **I2C Bus Recovery** - odzyskiwanie magistrali I2C po błędach
+- ✅ **I2C Timeout** - zabezpieczenie przed nieskończonym oczekiwaniem
+- ✅ **Quaternion Validation** - reset AHRS przy nieprawidłowych stanach
+- ✅ **NaN Detection** - ochrona przed błędnymi odczytami czujników
+- ✅ **micros() Overflow Handling** - poprawna obsługa przelewania licznika
+
 ## Dane lokalizacyjne / Location Data
 
 | Parametr | Wartość |
@@ -430,6 +438,27 @@ lib_deps =
 ### Wyświetlacz nie działa
 - Sprawdź adres I2C (domyślnie 0x3C)
 - Niektóre OLED używają 0x3D
+
+### Program się zawiesza / OLED zamraża obraz
+- Sprawdź jakość połączeń I2C (kable powinny być krótkie i dobrze zamocowane)
+- Sprawdź zasilanie - niestabilne zasilanie może powodować problemy z I2C
+- Program automatycznie wykrywa zawieszenia I2C i próbuje odzyskać magistralę
+- Watchdog automatycznie restartuje ESP32 jeśli program nie odpowiada przez 10 sekund
+- Sprawdź czy nie ma zakłóceń elektromagnetycznych w pobliżu
+
+## Mechanizmy stabilności
+
+Projekt zawiera kilka mechanizmów zwiększających stabilność:
+
+| Mechanizm | Opis |
+|-----------|------|
+| **Watchdog Timer** | Automatycznie restartuje ESP32 jeśli program nie odpowiada przez 10 sekund |
+| **I2C Bus Recovery** | Automatyczne odzyskiwanie magistrali I2C po wykryciu zawieszenia |
+| **I2C Timeout** | Timeout operacji I2C (50ms) zapobiega nieskończonemu oczekiwaniu |
+| **I2C Retry** | Do 3 prób powtórzenia przy błędach komunikacji I2C |
+| **Quaternion Validation** | Resetowanie AHRS przy wykryciu nieprawidłowego stanu kwaternionu |
+| **micros() Overflow Protection** | Poprawna obsługa przelewania licznika czasu (~71 minut) |
+| **NaN Detection** | Wykrywanie i odrzucanie nieprawidłowych odczytów czujników |
 
 ## Licencja
 
