@@ -7,7 +7,7 @@ Projekt do pomiaru pochylenia i wskazywania północy magnetycznej oraz geografi
 ## Sprzęt / Hardware
 
 - **ESP32-WROOM-32D** (lub dowolny ESP32 DevKit)
-- **ICM-20948** - 9-DOF IMU (akcelerometr, żyroskop, magnetometr)
+- **ICM-20948** - 9-DOF IMU (akcelerometr, żyroskop, magnetometr) - **połączony przez SPI**
 - **OLED 128x32** - wyświetlacz I2C (sterownik SSD1306)
 - **Przycisk** - do wyzwalania kalibracji (NO, normalnie otwarty)
 
@@ -21,6 +21,10 @@ Projekt do pomiaru pochylenia i wskazywania północy magnetycznej oraz geografi
 - ✅ Filtrowanie EMA z obsługą przejścia 0°/360°
 - ✅ Wskaźnik kompasu graficzny na OLED
 
+### Komunikacja
+- ✅ **SPI dla IMU** - szybsza i bardziej niezawodna komunikacja z ICM-20948 (4 MHz)
+- ✅ **I2C dla OLED** - standardowy interfejs dla wyświetlacza
+
 ### Kalibracja na urządzeniu (bez zewnętrznego oprogramowania!)
 - ✅ **Jeden przycisk** - przytrzymaj 2s aby rozpocząć kalibrację
 - ✅ **Przewodnik na OLED** - instrukcje krok po kroku na ekranie
@@ -30,21 +34,21 @@ Projekt do pomiaru pochylenia i wskazywania północy magnetycznej oraz geografi
 
 ### Korekcja magnetometru
 - ✅ Korekcja Hard Iron (przesunięcie środka elipsoidy)
-- ✅ Korekcja Soft Iron (skalowanie osi do sfery)
+- ✅ Korekcja Soft Iron (skalowanie osi do sfery) z pełną dekompozycją własną (Jacobi)
 - ✅ Zbieranie do 500 próbek dla lepszej dokładności
 - ✅ Automatyczne wykrywanie zakończenia kalibracji
 
 ### Optymalizacje ESP32
 - ✅ Wykorzystanie jednostki FPU dla szybkich obliczeń float
 - ✅ Zapis kalibracji w NVS (Preferences) zamiast EEPROM
-- ✅ Szybsze próbkowanie (1000 próbek żyroskopu)
+- ✅ Szybsze próbkowanie (500-1000 próbek żyroskopu z odrzucaniem outlierów)
 - ✅ Wyświetlacz OLED 128x32 z kompaktowym UI
 - ✅ Aktualizacja wyświetlacza 10Hz
 
 ### Stabilność i niezawodność
 - ✅ **Watchdog Timer** - automatyczny restart przy zawieszeniu programu
-- ✅ **I2C Bus Recovery** - odzyskiwanie magistrali I2C po błędach
-- ✅ **I2C Timeout** - zabezpieczenie przed nieskończonym oczekiwaniem
+- ✅ **I2C Bus Recovery** - odzyskiwanie magistrali I2C po błędach (dla OLED)
+- ✅ **I2C Timeout** - zabezpieczenie przed nieskończonym oczekiwaniem (15ms)
 - ✅ **Quaternion Validation** - reset AHRS przy nieprawidłowych stanach
 - ✅ **NaN Detection** - ochrona przed błędnymi odczytami czujników
 - ✅ **micros() Overflow Handling** - poprawna obsługa przelewania licznika
@@ -66,18 +70,18 @@ Projekt do pomiaru pochylenia i wskazywania północy magnetycznej oraz geografi
 ESP32-WROOM-32D
 ┌─────────────────────────────────────────────────────────────┐
 │                                                             │
-│  EN ─┐                                          ┌─ GPIO23   │
-│ VP36 ─┤    ┌──────────────────────────────┐    ├─ GPIO22 ──── SCL (I2C)
+│  EN ─┐                                          ┌─ GPIO23 ──── SPI MOSI (IMU)
+│ VP36 ─┤    ┌──────────────────────────────┐    ├─ GPIO22 ──── SCL (I2C OLED)
 │ VN39 ─┤    │                              │    ├─ TX0       │
 │  D34 ─┤    │         ESP32-WROOM-32D      │    ├─ RX0       │
-│  D35 ─┤    │                              │    ├─ GPIO21 ──── SDA (I2C)
+│  D35 ─┤    │                              │    ├─ GPIO21 ──── SDA (I2C OLED)
 │  D32 ─┤    │          ┌─────────┐         │    ├─ GND       │
-│  D33 ─┤    │          │  ESP32  │         │    ├─ GPIO19    │
-│  D25 ─┤    │          │  CHIP   │         │    ├─ GPIO18    │
-│  D26 ─┤    │          └─────────┘         │    ├─ GPIO5     │
+│  D33 ─┤    │          │  ESP32  │         │    ├─ GPIO19 ──── SPI MISO (IMU)
+│  D25 ─┤    │          │  CHIP   │         │    ├─ GPIO18 ──── SPI SCK (IMU)
+│  D26 ─┤    │          └─────────┘         │    ├─ GPIO5 ───── SPI CS (IMU)
 │  D27 ─┤    │                              │    ├─ GPIO17    │
 │  D14 ─┤    │                              │    ├─ GPIO16    │
-│  D12 ─┤    │                              │    ├─ GPIO4     │
+│  D12 ─┤    │                              │    ├─ GPIO4 ───── INT (IMU, opcj.)
 │  D13 ─┤    └──────────────────────────────┘    ├─ GPIO0     │
 │  GND ─┤                                        ├─ GPIO2 ────── LED (wbudowana)
 │  VIN ─┤                                        ├─ GPIO15 ───── BUTTON
@@ -90,33 +94,91 @@ ESP32-WROOM-32D
 
 | Funkcja | Pin ESP32 | Opis |
 |---------|-----------|------|
-| **I2C SDA** | GPIO21 | Dane I2C (do ICM-20948 i OLED) |
-| **I2C SCL** | GPIO22 | Zegar I2C (do ICM-20948 i OLED) |
+| **SPI MOSI** | GPIO23 | Master Out Slave In (do ICM-20948) |
+| **SPI MISO** | GPIO19 | Master In Slave Out (z ICM-20948) |
+| **SPI SCK** | GPIO18 | Zegar SPI (do ICM-20948) |
+| **SPI CS** | GPIO5 | Chip Select dla ICM-20948 |
+| **I2C SDA** | GPIO21 | Dane I2C (do OLED) |
+| **I2C SCL** | GPIO22 | Zegar I2C (do OLED) |
+| **INT** | GPIO4 | Przerwanie z ICM-20948 (opcjonalne) |
 | **BUTTON** | GPIO15 | Przycisk kalibracji (do GND) |
 | **LED** | GPIO2 | Wbudowana dioda LED (status) |
 | **VIN** | VIN | Zasilanie 5V (z USB lub zewn.) |
 | **3V3** | 3V3 | Zasilanie 3.3V dla czujników |
 | **GND** | GND | Masa |
 
-### Połączenia ICM-20948
+### Połączenia ICM-20948 (SPI)
+
+Moduł ICM-20948 komunikuje się przez interfejs **SPI** (Serial Peripheral Interface) z prędkością 4 MHz. SPI zapewnia szybszą i bardziej niezawodną komunikację niż I2C, co jest szczególnie ważne dla aplikacji wymagających wysokiej częstotliwości próbkowania.
+
+#### Schemat połączeń SPI
 
 ```
-ICM-20948              ESP32
-┌────────┐           ┌────────┐
-│  VCC   │───────────│  3V3   │
-│  GND   │───────────│  GND   │
-│  SDA   │───────────│ GPIO21 │
-│  SCL   │───────────│ GPIO22 │
-│  AD0   │───────────│  3V3   │  ← Adres I2C: 0x69
-│  INT   │           │        │  (opcjonalnie)
-└────────┘           └────────┘
+ICM-20948 Breakout          ESP32-WROOM-32D
+┌────────────────┐         ┌────────────────┐
+│                │         │                │
+│  VCC (3.3V)    │─────────│ 3V3            │
+│  GND           │─────────│ GND            │
+│                │         │                │
+│  SDA (MOSI)    │─────────│ GPIO23 (VSPI)  │  ← Dane DO czujnika
+│  SCL (SCLK)    │─────────│ GPIO18 (VSPI)  │  ← Zegar SPI
+│  AD0 (MISO)    │─────────│ GPIO19 (VSPI)  │  ← Dane Z czujnika
+│  NCS (CS)      │─────────│ GPIO5          │  ← Chip Select (aktywny LOW)
+│                │         │                │
+│  INT           │─────────│ GPIO4          │  (opcjonalnie, dla przerwań)
+│                │         │                │
+└────────────────┘         └────────────────┘
 ```
 
-⚠️ **Adres I2C:**
-- AD0 → GND = adres 0x68
-- AD0 → 3V3 = adres 0x69 (domyślnie w kodzie)
+#### Mapowanie pinów ICM-20948 (I2C vs SPI)
 
-### Połączenia OLED 128x32
+| Pin na module | Tryb I2C | Tryb SPI | Opis |
+|---------------|----------|----------|------|
+| **VCC** | Zasilanie 3.3V | Zasilanie 3.3V | Zasilanie modułu |
+| **GND** | Masa | Masa | Masa |
+| **SDA** | Dane I2C | **MOSI** | Master Out Slave In |
+| **SCL** | Zegar I2C | **SCLK** | Zegar SPI |
+| **AD0** | Adres I2C (LSB) | **MISO** | Master In Slave Out |
+| **NCS** | Nie używany | **CS** | Chip Select (aktywny LOW) |
+| **INT** | Przerwanie | Przerwanie | Opcjonalne |
+
+#### Parametry SPI
+
+| Parametr | Wartość | Opis |
+|----------|---------|------|
+| Prędkość zegara | 4 MHz | Maksymalnie ICM-20948 wspiera 7 MHz |
+| Tryb SPI | Mode 0 | CPOL=0, CPHA=0 |
+| Kolejność bitów | MSB first | Najpierw najbardziej znaczący bit |
+| Magistrala | VSPI | Domyślna magistrala SPI na ESP32 |
+
+#### Ważne uwagi dotyczące SPI
+
+1. **Długość przewodów**: Przewody SPI powinny być jak najkrótsze (< 15cm) dla stabilnej komunikacji przy 4 MHz.
+
+2. **Rezystory pull-up**: Pin CS (NCS) powinien mieć rezystor pull-up 10kΩ do VCC, aby zapobiec przypadkowej aktywacji podczas startu ESP32. Większość modułów breakout ma już wbudowany pull-up.
+
+3. **Separacja magistrali**: IMU używa SPI, a OLED używa I2C - to dwa oddzielne interfejsy, które nie kolidują ze sobą.
+
+4. **Zasilanie**: Moduł ICM-20948 wymaga zasilania **3.3V**. Nie podłączaj do 5V bez konwertera poziomów!
+
+5. **Kolejność włączania**: CS powinien być HIGH przed inicjalizacją SPI, aby uniknąć konfliktów na magistrali.
+
+#### Alternatywne piny SPI
+
+Jeśli domyślne piny VSPI są zajęte, można użyć HSPI:
+
+| Funkcja | VSPI (domyślne) | HSPI (alternatywne) |
+|---------|-----------------|---------------------|
+| MOSI | GPIO23 | GPIO13 |
+| MISO | GPIO19 | GPIO12 |
+| SCK | GPIO18 | GPIO14 |
+| CS | GPIO5 (dowolny) | GPIO15 (dowolny) |
+
+> **Uwaga:** Zmiana na HSPI wymaga modyfikacji kodu - zmień definicje `SPI_MOSI`, `SPI_MISO`, `SPI_SCK` w pliku .ino.
+
+### Połączenia OLED 128x32 (I2C)
+
+Wyświetlacz OLED pozostaje na magistrali I2C, niezależnie od IMU:
 
 ```
 OLED SSD1306           ESP32
@@ -157,12 +219,14 @@ ESP32 GND ─────────────┘
               │              │              │
               └──────────────┴──────────────┴────── GND
 
-       ESP32-WROOM                    ICM-20948
-         [GPIO21] ───────────────────── [SDA]
-         [GPIO22] ───────────────────── [SCL]
-                                        [AD0] ── 3V3
+       ESP32-WROOM                    ICM-20948 (SPI)
+         [GPIO23] ───────────────────── [SDA/MOSI]
+         [GPIO18] ───────────────────── [SCL/SCLK]
+         [GPIO19] ───────────────────── [AD0/MISO]
+         [GPIO5]  ───────────────────── [NCS]
+         [GPIO4]  ───────────────────── [INT] (opcjonalnie)
 
-       ESP32-WROOM                    OLED 128x32
+       ESP32-WROOM                    OLED 128x32 (I2C)
          [GPIO21] ───────────────────── [SDA]
          [GPIO22] ───────────────────── [SCL]
 
@@ -367,9 +431,11 @@ Projekt wykorzystuje filtr Mahony AHRS oparty na kwaternionach z referencjami we
 - **Integracja żyroskopu** - płynna odpowiedź na ruch
 - **Kompensacja dryfu** - sprzężenie proporcjonalne i całkowe
 
-Parametry dla ESP32:
-- `Kp = 30.0` - wzmocnienie proporcjonalne
-- `Ki = 0.01` - wzmocnienie całkowe
+Parametry dla ESP32 (zoptymalizowane dla stabilności):
+- `Kp = 10.0` - wzmocnienie proporcjonalne (niższe = mniej oscylacji)
+- `Ki = 0.005` - wzmocnienie całkowe (kompensacja dryfu)
+
+> **Uwaga:** Przy bardzo dynamicznych ruchach można zwiększyć Kp do 15-20, ale przy spokojnych pomiarach Kp=10 jest bardziej stabilne.
 
 ## Wymagane biblioteki
 
@@ -377,7 +443,7 @@ Zainstaluj przez Arduino IDE Library Manager:
 
 1. **Adafruit SSD1306** - obsługa wyświetlacza OLED
 2. **Adafruit GFX** - grafika dla wyświetlaczy
-3. **SparkFun ICM-20948** - obsługa czujnika IMU
+3. **SparkFun ICM-20948** - obsługa czujnika IMU (wspiera I2C i SPI)
 4. **Preferences** - wbudowana w ESP32 (zapis w NVS)
 
 ## Instalacja
@@ -426,32 +492,82 @@ lib_deps =
     sparkfun/SparkFun 9DoF IMU Breakout - ICM 20948@^1.2.12
 ```
 
+## Dlaczego SPI zamiast I2C?
+
+### Porównanie interfejsów
+
+| Cecha | I2C | SPI |
+|-------|-----|-----|
+| **Prędkość** | 400 kHz (Fast Mode) | 4 MHz (możliwe do 7 MHz) |
+| **Liczba przewodów** | 2 (SDA, SCL) | 4 (MOSI, MISO, SCK, CS) |
+| **Dzielona magistrala** | Tak (wiele urządzeń) | Tak (oddzielny CS dla każdego) |
+| **Niezawodność** | Podatna na zakłócenia | Bardziej odporna |
+| **Złożoność** | Prostsza | Więcej przewodów |
+| **Opóźnienie** | Wyższe (protokół adresowania) | Niższe (bezpośredni dostęp) |
+
+### Zalety SPI dla IMU
+
+1. **Szybsze próbkowanie** - 10x wyższa prędkość pozwala na częstsze odczyty
+2. **Mniejsze opóźnienia** - krytyczne dla filtra AHRS w czasie rzeczywistym
+3. **Lepsza stabilność** - brak problemów z adresowaniem i arbitrażem magistrali
+4. **Separacja od OLED** - IMU na SPI nie koliduje z wyświetlaczem na I2C
+
+### Kiedy użyć I2C?
+
+- Gdy masz ograniczoną liczbę dostępnych pinów GPIO
+- Gdy odległość do czujnika jest bardzo mała (<5cm)
+- Gdy nie potrzebujesz maksymalnej wydajności
+
 ## Rozwiązywanie problemów
 
-### IMU nie wykryty
-- Sprawdź połączenia I2C (SDA/SCL)
-- Sprawdź zasilanie 3.3V
-- Zmień `ICM_AD0_VAL` na 0 jeśli AD0 podłączony do GND
+### IMU nie wykryty (SPI)
+- Sprawdź połączenia SPI: MOSI (GPIO23), MISO (GPIO19), SCK (GPIO18), CS (GPIO5)
+- Sprawdź zasilanie 3.3V na module ICM-20948
+- Upewnij się, że CS jest podłączony i nie wisi w powietrzu
+- Sprawdź czy przewody nie są za długie (max 15cm dla 4 MHz)
+- Zweryfikuj ciągłość połączeń multimetrem
+
+### IMU wykryty ale błędne odczyty
+- Sprawdź jakość lutowania/połączeń
+- Zmniejsz prędkość SPI do 1 MHz (zmień `SPI_SPEED` w kodzie)
+- Dodaj kondensator 100nF między VCC a GND blisko modułu
+- Sprawdź czy nie ma zwarć między pinami
 
 ### Kompas nieprecyzyjny
 - Wykonaj ponowną kalibrację z lepszym pokryciem osi
 - Unikaj metalu w pobliżu podczas kalibracji
 - Sprawdź jakość kalibracji (cel: > 70%)
+- Upewnij się, że deklinacja magnetyczna jest poprawna dla Twojej lokalizacji
 
 ### Przycisk nie reaguje
 - Sprawdź połączenie do GPIO15 i GND
 - Użyj przycisku NO (normalnie otwarty)
 
-### Wyświetlacz nie działa
+### Wyświetlacz nie działa (I2C)
 - Sprawdź adres I2C (domyślnie 0x3C)
 - Niektóre OLED używają 0x3D
+- Sprawdź połączenia SDA (GPIO21) i SCL (GPIO22)
 
 ### Program się zawiesza / OLED zamraża obraz
-- Sprawdź jakość połączeń I2C (kable powinny być krótkie i dobrze zamocowane)
-- Sprawdź zasilanie - niestabilne zasilanie może powodować problemy z I2C
+- Sprawdź jakość połączeń I2C dla OLED (kable krótkie i dobrze zamocowane)
+- Sprawdź zasilanie - niestabilne zasilanie może powodować problemy
 - Program automatycznie wykrywa zawieszenia I2C i próbuje odzyskać magistralę
 - Watchdog automatycznie restartuje ESP32 jeśli program nie odpowiada przez 10 sekund
 - Sprawdź czy nie ma zakłóceń elektromagnetycznych w pobliżu
+
+### Diagnostyka przez Serial Monitor
+
+Otwórz Serial Monitor (115200 baud) aby zobaczyć komunikaty diagnostyczne:
+
+```
+=== ICM20948 Compass ESP32 (SPI) ===
+Initializing...
+I2C scan: OLED=OK (IMU is on SPI)
+IMU found on SPI bus
+  CS: GPIO5, SCK: GPIO18, MISO: GPIO19, MOSI: GPIO23
+Magnetometer initialized
+IMU initialized successfully via SPI
+```
 
 ## Mechanizmy stabilności
 
@@ -460,12 +576,13 @@ Projekt zawiera kilka mechanizmów zwiększających stabilność:
 | Mechanizm | Opis |
 |-----------|------|
 | **Watchdog Timer** | Automatycznie restartuje ESP32 jeśli program nie odpowiada przez 10 sekund |
-| **I2C Bus Recovery** | Automatyczne odzyskiwanie magistrali I2C po wykryciu zawieszenia |
-| **I2C Timeout** | Timeout operacji I2C (50ms) zapobiega nieskończonemu oczekiwaniu |
-| **I2C Retry** | Do 3 prób powtórzenia przy błędach komunikacji I2C |
+| **I2C Bus Recovery** | Automatyczne odzyskiwanie magistrali I2C po wykryciu zawieszenia (dla OLED) |
+| **I2C Timeout** | Timeout operacji I2C (15ms) zapobiega nieskończonemu oczekiwaniu |
+| **SPI dla IMU** | Szybsza i bardziej niezawodna komunikacja z czujnikiem |
 | **Quaternion Validation** | Resetowanie AHRS przy wykryciu nieprawidłowego stanu kwaternionu |
 | **micros() Overflow Protection** | Poprawna obsługa przelewania licznika czasu (~71 minut) |
 | **NaN Detection** | Wykrywanie i odrzucanie nieprawidłowych odczytów czujników |
+| **Gyro Outlier Rejection** | Odrzucanie wartości odstających podczas kalibracji żyroskopu |
 
 ## Licencja
 
