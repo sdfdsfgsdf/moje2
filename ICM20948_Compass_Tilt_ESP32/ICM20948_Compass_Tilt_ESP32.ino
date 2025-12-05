@@ -61,6 +61,8 @@
 #define SCREEN_HEIGHT     32   // Changed to 128x32 OLED
 #define OLED_RESET        -1
 #define OLED_I2C_ADDRESS  0x3C
+#define CHAR_WIDTH        6    // Width of character in pixels at text size 1
+#define MAX_CHARS_LINE    (SCREEN_WIDTH / CHAR_WIDTH)  // 21 chars per line
 
 // ============================================================================
 // ICM-20948 CONFIGURATION
@@ -693,13 +695,14 @@ void runFullCalibration(void) {
   // Save to NVS
   saveCalibration();
   
-  // Show results
+  // Show results (max 21 chars per line)
   char line1[22], line2[22];
   snprintf(line1, sizeof(line1), "Quality: %d%%", g_cal.quality);
-  snprintf(line2, sizeof(line2), "X:%.0f Y:%.0f Z:%.0f", 
-           g_cal.magMax[0] - g_cal.magMin[0],
-           g_cal.magMax[1] - g_cal.magMin[1],
-           g_cal.magMax[2] - g_cal.magMin[2]);
+  // Truncate range values to fit display
+  int rx = (int)(g_cal.magMax[0] - g_cal.magMin[0]);
+  int ry = (int)(g_cal.magMax[1] - g_cal.magMin[1]);
+  int rz = (int)(g_cal.magMax[2] - g_cal.magMin[2]);
+  snprintf(line2, sizeof(line2), "%d/%d/%d", rx, ry, rz);
   
   showMsg("CAL OK! Saved", line1, line2);
   
@@ -834,12 +837,12 @@ void runMagCalibration(void) {
       progress += (minTimeOk ? 25 : (int)(elapsed * 25 / MAG_CAL_MIN_TIME_MS));
       progress += (minSamplesOk ? 25 : (g_sampleCount * 25 / MAG_CAL_MIN_SAMPLES));
       
-      // Build status lines - compact format for 128x32 OLED
+      // Build status lines - compact format for 128x32 OLED (max 21 chars)
       char line1[22], line2[22];
-      snprintf(line1, sizeof(line1), "X:%s Y:%s %ds", 
-               xOk ? "+" : "-", yOk ? "+" : "-",
+      snprintf(line1, sizeof(line1), "%c%c %ds", 
+               xOk ? 'X' : 'x', yOk ? 'Y' : 'y',
                (int)((MAG_CAL_MAX_TIME_MS - elapsed) / 1000));
-      snprintf(line2, sizeof(line2), "N:%d R:%.0f/%.0f", g_sampleCount, rangeX, rangeY);
+      snprintf(line2, sizeof(line2), "n%d %.0f/%.0f", g_sampleCount, rangeX, rangeY);
       
       showCalibrationScreen("MAG CAL", line1, line2, nullptr, progress);
       
@@ -1378,15 +1381,15 @@ void showCalibrationScreen(const char* title, const char* line1,
   
   // Progress bar (if >= 0) at row 2, or show line2/line3
   if (progress >= 0) {
-    // Show line2 after title if provided
+    // Show line2 after title if provided (title is ~8 chars = 48px, add margin)
     if (line2) {
-      display.setCursor(60, 0);  // After title on same line
+      display.setCursor(10 * CHAR_WIDTH, 0);  // Position after ~10 char title
       display.print(line2);
     }
     
     int barY = 22;
     int barH = 8;
-    int barW = SCREEN_WIDTH - 30;  // Leave 30px for percentage text
+    int barW = SCREEN_WIDTH - 5 * CHAR_WIDTH;  // Leave space for percentage text
     
     display.drawRect(0, barY, barW, barH, SSD1306_WHITE);
     int fillW = (progress * (barW - 2)) / 100;
