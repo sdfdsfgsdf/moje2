@@ -186,7 +186,25 @@ ESP32 GND ─────────────┘
 2. Wyświetli się ekran powitalny kalibracji
 3. **Naciśnij przycisk** aby rozpocząć
 
-#### Krok 1: Kalibracja żyroskopu
+#### Krok 1: Ustaw czujnik płasko
+```
+┌────────────────────────┐
+│ FLAT CHECK             │
+│                        │
+│ Ustaw plasko           │
+│ Chip gora              │
+│                        │
+│ ax:0.02 ay:0.01        │
+│ az:0.98 (28s)          │
+└────────────────────────┘
+```
+- Ustaw czujnik **płasko** na stabilnej powierzchni
+- Chip musi być skierowany **do góry** (bottom down)
+- Przytrzymaj nieruchomo przez ~1.5 sekundy
+- Program weryfikuje orientację za pomocą akcelerometru
+- Naciśnij przycisk aby pominąć (jeśli jesteś pewien orientacji)
+
+#### Krok 2: Kalibracja żyroskopu
 ```
 ┌────────────────────────┐
 │▓▓▓▓ GYRO CAL ▓▓▓▓▓▓▓▓▓▓│
@@ -201,7 +219,7 @@ ESP32 GND ─────────────┘
 - Pasek postępu pokazuje zbieranie 1000 próbek
 - Trwa około 2-3 sekundy
 
-#### Krok 2: Kalibracja magnetometru
+#### Krok 3: Kalibracja magnetometru
 ```
 ┌────────────────────────┐
 │▓▓▓▓ MAG CAL ▓▓▓▓▓▓▓▓▓▓│
@@ -222,7 +240,7 @@ ESP32 GND ─────────────┘
 - **Naciśnij przycisk** gdy skończysz (po minimum 10s)
 - Kalibracja kończy się automatycznie gdy zebrane wystarczające dane
 
-#### Krok 3: Wyniki
+#### Krok 4: Wyniki
 ```
 ┌────────────────────────┐
 │ CAL COMPLETE           │
@@ -233,6 +251,10 @@ ESP32 GND ─────────────┘
 │                        │
 └────────────────────────┘
 ```
+
+**Uwaga:** Kalibracja używa wyłącznie metody dopasowania elipsoidy (ellipsoid fitting). 
+Jeśli kalibracja nie powiedzie się (zbyt mało próbek lub błąd dopasowania), 
+wyświetli się komunikat "CAL FAILED!" i kalibracja nie zostanie zapisana.
 
 ### Wskaźnik jakości kalibracji
 
@@ -323,33 +345,18 @@ calibrated[1] = M_Ainv[1][0]*temp[0] + M_Ainv[1][1]*temp[1] + M_Ainv[1][2]*temp[
 calibrated[2] = M_Ainv[2][0]*temp[0] + M_Ainv[2][1]*temp[1] + M_Ainv[2][2]*temp[2];
 ```
 
-### Metoda Min/Max (Cave Pearl Project - fallback)
-
-Jeśli dopasowanie elipsoidy nie powiedzie się, używana jest prostsza metoda min/max:
-
-```
-// Hard Iron:
-offset[i] = (max[i] + min[i]) / 2
-
-// Soft Iron (skalowanie diagonalne):
-delta[i] = max[i] - min[i]
-avgDelta = (delta[0] + delta[1] + delta[2]) / 3
-scale[i] = avgDelta / delta[i]
-
-// Zastosowanie:
-calibrated[i] = (raw[i] - offset[i]) * scale[i]
-```
-
 ### Zalety metody Ellipsoid Fitting
 
-| Cecha | Min/Max | Ellipsoid Fitting |
-|-------|---------|-------------------|
-| Korekcja Hard Iron | ✅ | ✅ |
-| Korekcja Soft Iron (skalowanie) | ✅ | ✅ |
-| Korekcja nieortogonalności | ❌ | ✅ |
-| Korekcja pełnej rotacji elipsoidy | ❌ | ✅ |
-| Odporność na outliers | ❌ | ✅ |
-| Dokładność typowa | 70-85% | 90-95% |
+Projekt używa wyłącznie metody dopasowania elipsoidy (ellipsoid fitting). Metoda min/max została usunięta.
+
+| Cecha | Ellipsoid Fitting |
+|-------|-------------------|
+| Korekcja Hard Iron | ✅ |
+| Korekcja Soft Iron (skalowanie) | ✅ |
+| Korekcja nieortogonalności | ✅ |
+| Korekcja pełnej rotacji elipsoidy | ✅ |
+| Odporność na outliers | ✅ |
+| Dokładność typowa | 90-95% |
 
 ## Filtr Mahony AHRS
 
