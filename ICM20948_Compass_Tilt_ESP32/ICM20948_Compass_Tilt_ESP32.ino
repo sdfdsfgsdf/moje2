@@ -375,7 +375,8 @@ void setup() {
   // Initialize I2C with ESP32 pins
   Wire.begin(I2C_SDA, I2C_SCL);
   Wire.setClock(ICM_I2C_SPEED);
-  Wire.setTimeOut(I2C_TIMEOUT_MS);  // Set I2C timeout
+  // ESP32 Arduino Wire uses setTimeOut (capital O), different from standard Arduino setTimeout
+  Wire.setTimeOut(I2C_TIMEOUT_MS);  // Set I2C timeout in milliseconds
   
   // Initialize button
   initButton();
@@ -608,6 +609,7 @@ bool recoverI2cBus(void) {
   // Reinitialize I2C
   Wire.begin(I2C_SDA, I2C_SCL);
   Wire.setClock(ICM_I2C_SPEED);
+  // ESP32 Arduino Wire uses setTimeOut (capital O)
   Wire.setTimeOut(I2C_TIMEOUT_MS);
   
   delay(50);
