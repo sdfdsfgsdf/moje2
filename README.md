@@ -1,14 +1,8 @@
 # ICM-20948 Compass & Tilt Meter
 
-Projekt do pomiaru pochylenia i wskazywania północy magnetycznej oraz geograficznej z filtrem Mahony AHRS.
+Projekt do pomiaru pochylenia i wskazywania północy magnetycznej oraz geograficznej z filtrem Mahony AHRS dla **ESP32-WROOM-32D**.
 
-**Dostępne wersje:**
-- 📁 `ICM20948_Compass_Tilt/` - Wersja dla **Arduino Pro Mini** (oryginalna)
-- 📁 `ICM20948_Compass_Tilt_ESP32/` - Wersja dla **ESP32-WROOM-32D** (zoptymalizowana) ⭐
-
----
-
-# 🆕 Wersja ESP32-WROOM-32D (Zalecana)
+📁 `ICM20948_Compass_Tilt_ESP32/` - Wersja dla **ESP32-WROOM-32D**
 
 ## Sprzęt / Hardware
 
@@ -44,8 +38,8 @@ Projekt do pomiaru pochylenia i wskazywania północy magnetycznej oraz geografi
 - ✅ Wykorzystanie jednostki FPU dla szybkich obliczeń float
 - ✅ Zapis kalibracji w NVS (Preferences) zamiast EEPROM
 - ✅ Szybsze próbkowanie (1000 próbek żyroskopu)
-- ✅ Większy wyświetlacz 128x64 z bogatszym UI
-- ✅ Aktualizacja wyświetlacza 10Hz (vs 4Hz na Arduino)
+- ✅ Wyświetlacz OLED 128x32 z kompaktowym UI
+- ✅ Aktualizacja wyświetlacza 10Hz
 
 ## Dane lokalizacyjne / Location Data
 
@@ -417,22 +411,6 @@ lib_deps =
     sparkfun/SparkFun 9DoF IMU Breakout - ICM 20948@^1.2.12
 ```
 
-## Porównanie wersji
-
-| Cecha | Arduino Pro Mini | ESP32-WROOM-32D |
-|-------|------------------|-----------------|
-| Flash | ~25KB | ~250KB |
-| RAM | ~1.2KB | ~520KB |
-| Zegar | 8/16 MHz | 240 MHz |
-| FPU | Brak | Tak |
-| Kalibracja | 3x restart | 1 przycisk |
-| Zapis | EEPROM + CRC | NVS (Flash) |
-| Wyświetlacz | 128x32 | 128x32 |
-| Próbki żyroskopu | 500 | 1000 |
-| Próbki magnetometru | Min/Max tylko | Do 500 punktów |
-| Aktualizacja wyśw. | 4 Hz | 10 Hz |
-| Monitor szeregowy | Ograniczony | Pełna diagnostyka |
-
 ## Rozwiązywanie problemów
 
 ### IMU nie wykryty
@@ -463,73 +441,3 @@ MIT License
 - [jremington/ICM_20948-AHRS](https://github.com/jremington/ICM_20948-AHRS)
 - [Pololu - Correcting Magnetometer](https://forum.pololu.com/t/correcting-the-balboa-magnetometer/14315)
 - [SparkFun ICM-20948 Library](https://github.com/sparkfun/SparkFun_ICM-20948_ArduinoLibrary)
-
----
-
-# Wersja Arduino Pro Mini (Oryginalna)
-
-Dokumentacja oryginalnej wersji znajduje się poniżej dla zachowania kompatybilności wstecznej.
-
-## Sprzęt / Hardware
-
-- **Arduino Mini Pro** (3.3V lub 5V)
-- **ICM-20948** - 9-DOF IMU (akcelerometr, żyroskop, magnetometr)
-- **OLED 128x32** - wyświetlacz I2C (sterownik SSD1306)
-
-## Wyprowadzenie pinów
-
-### Arduino Mini Pro
-
-```
-┌─────────────────────────────────────────┐
-│  [RAW] ─── Zasilanie 5-12V             │
-│  [VCC] ─── Zasilanie regulowane 3.3/5V │
-│  [GND] ─── Masa                         │
-│                                         │
-│  [A4/SDA] ─── I2C Data                 │
-│  [A5/SCL] ─── I2C Clock                │
-└─────────────────────────────────────────┘
-```
-
-### ICM-20948 (Czujnik 9-DOF)
-
-```
-┌─────────────────────────────────────────┐
-│  VCC ────── Arduino VCC (3.3V!)        │
-│  GND ────── Arduino GND                │
-│  SDA ────── Arduino A4                 │
-│  SCL ────── Arduino A5                 │
-│  AD0 ────── GND (adres 0x68)           │
-│         lub VCC (adres 0x69)           │
-└─────────────────────────────────────────┘
-```
-
-### OLED 128x32 (SSD1306)
-
-```
-┌─────────────────────────────────────────┐
-│  VCC ────── Arduino VCC (3.3V lub 5V)  │
-│  GND ────── Arduino GND                │
-│  SDA ────── Arduino A4                 │
-│  SCL ────── Arduino A5                 │
-└─────────────────────────────────────────┘
-```
-
-## Automatyczna kalibracja (Arduino)
-
-Kalibracja uruchamia się poprzez **3 krótkie uruchomienia** (<2 sekundy każde):
-
-| Uruchomienie | Czas działania | Efekt |
-|--------------|----------------|-------|
-| 1 | < 2 sekundy | Licznik +1 |
-| 2 | < 2 sekundy | Licznik +1 |
-| 3 | - | **Tryb kalibracji** |
-
-## Instalacja (Arduino)
-
-1. Otwórz plik `ICM20948_Compass_Tilt/ICM20948_Compass_Tilt.ino`
-2. Zainstaluj wymagane biblioteki
-3. Wybierz płytkę: **Arduino Pro or Pro Mini**
-4. Wybierz procesor: **ATmega328P (3.3V, 8MHz)** lub **ATmega328P (5V, 16MHz)**
-5. Wgraj program
-6. Wykonaj kalibrację (3x szybki restart)

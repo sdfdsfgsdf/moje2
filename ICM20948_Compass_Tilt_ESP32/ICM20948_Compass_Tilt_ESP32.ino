@@ -325,7 +325,7 @@ void showCalibrationScreen(const char* title, const char* line1,
                            const char* line2 = nullptr, const char* line3 = nullptr,
                            int progress = -1);
 void showMsg(const char* l1, const char* l2 = nullptr, 
-             const char* l3 = nullptr, const char* l4 = nullptr);
+             const char* l3 = nullptr);
 float getDeviationFromNorth(float heading);
 char getCardinalChar(float heading);
 
@@ -358,12 +358,12 @@ void setup() {
   
   // Initialize display
   initDisplay();
-  showMsg("ICM20948", "Compass ESP32", "Initializing...");
+  showMsg("ICM20948 Compass", "ESP32", "Init...");
   delay(500);
   
   // Initialize IMU
   if (!initIMU()) {
-    showMsg("ERROR!", "IMU not found", "Check wiring", "SDA:21 SCL:22");
+    showMsg("ERROR!", "IMU not found", "SDA:21 SCL:22");
     Serial.println(F("ERROR: IMU initialization failed!"));
     while (true) {
       digitalWrite(LED_PIN, !digitalRead(LED_PIN));
@@ -378,10 +378,10 @@ void setup() {
   loadCalibration();
   
   if (g_cal.isValid) {
-    showMsg("Calibration", "loaded from", "memory", "Hold BTN=recal");
+    showMsg("Cal loaded", "from memory", "Hold BTN=recal");
     Serial.println(F("Calibration loaded from NVS"));
   } else {
-    showMsg("No calibration", "Hold button", "for 2s to", "start cal");
+    showMsg("No calibration", "Hold BTN 2s", "to start cal");
     Serial.println(F("No valid calibration found"));
   }
   delay(2000);
@@ -396,7 +396,7 @@ void setup() {
   // Initialize AHRS timing
   g_ahrs.lastUpdate = micros();
   
-  showMsg("Ready!", "Long press BTN", "for full cal");
+  showMsg("Ready!", "Hold BTN 2s", "for full cal");
   delay(1500);
   
   Serial.println(F("System ready!"));
@@ -667,7 +667,7 @@ void runFullCalibration(void) {
   digitalWrite(LED_PIN, HIGH);
   
   // Welcome screen
-  showMsg("=CALIBRATION=", "", "Press button", "to start");
+  showMsg("=CALIBRATION=", "Press BTN", "to start");
   Serial.println(F("\n=== Starting Full Calibration ==="));
   
   // Wait for button press or timeout
@@ -678,12 +678,12 @@ void runFullCalibration(void) {
   }
   
   // Step 1: Gyroscope calibration
-  showMsg("STEP 1/2", "GYROSCOPE", "", "Hold very still!");
+  showMsg("STEP 1/2", "GYROSCOPE", "Hold still!");
   delay(2000);
   runGyroCalibration();
   
   // Step 2: Magnetometer calibration
-  showMsg("STEP 2/2", "MAGNETOMETER", "", "Rotate slowly");
+  showMsg("STEP 2/2", "MAGNETOMETER", "Rotate slowly");
   delay(2000);
   runMagCalibration();
   
@@ -694,15 +694,14 @@ void runFullCalibration(void) {
   saveCalibration();
   
   // Show results
-  char line1[32], line2[32], line3[32];
+  char line1[22], line2[22];
   snprintf(line1, sizeof(line1), "Quality: %d%%", g_cal.quality);
   snprintf(line2, sizeof(line2), "X:%.0f Y:%.0f Z:%.0f", 
            g_cal.magMax[0] - g_cal.magMin[0],
            g_cal.magMax[1] - g_cal.magMin[1],
            g_cal.magMax[2] - g_cal.magMin[2]);
-  snprintf(line3, sizeof(line3), "Saved!");
   
-  showMsg("CAL COMPLETE", line1, line2, line3);
+  showMsg("CAL OK! Saved", line1, line2);
   
   Serial.println(F("Calibration complete!"));
   Serial.printf("Quality: %d%%\n", g_cal.quality);
@@ -717,7 +716,7 @@ void runFullCalibration(void) {
  * @brief Gyroscope calibration - average readings while stationary
  */
 void runGyroCalibration(void) {
-  showCalibrationScreen("GYRO CAL", "Keep sensor", "completely still!", nullptr, 0);
+  showCalibrationScreen("GYRO CAL", "Hold still!", nullptr, nullptr, 0);
   delay(1000);
   
   long gyroSum[3] = {0, 0, 0};
@@ -735,7 +734,7 @@ void runGyroCalibration(void) {
     // Update progress bar
     if (i % 50 == 0) {
       int progress = (i * 100) / GYRO_CAL_SAMPLES;
-      showCalibrationScreen("GYRO CAL", "Keep sensor", "completely still!", nullptr, progress);
+      showCalibrationScreen("GYRO CAL", "Hold still!", nullptr, nullptr, progress);
     }
     
     delay(2);  // ~500Hz sample rate
@@ -750,7 +749,7 @@ void runGyroCalibration(void) {
   Serial.printf("Gyro offset: [%.2f, %.2f, %.2f] from %d samples\n",
                 g_cal.gyroOffset[0], g_cal.gyroOffset[1], g_cal.gyroOffset[2], validSamples);
   
-  showCalibrationScreen("GYRO CAL", "Complete!", nullptr, nullptr, 100);
+  showCalibrationScreen("GYRO CAL", "Done!", nullptr, nullptr, 100);
   delay(500);
 }
 
@@ -770,7 +769,7 @@ void runMagCalibration(void) {
   unsigned long lastUpdate = 0;
   bool complete = false;
   
-  showCalibrationScreen("MAG CAL", "Rotate slowly", "in all directions", "Press BTN=done", 0);
+  showCalibrationScreen("MAG CAL", "Rotate all dirs", "BTN=done", nullptr, 0);
   
   while (!complete && (millis() - startTime < MAG_CAL_MAX_TIME_MS)) {
     // Check for button press to end early
@@ -835,15 +834,14 @@ void runMagCalibration(void) {
       progress += (minTimeOk ? 25 : (int)(elapsed * 25 / MAG_CAL_MIN_TIME_MS));
       progress += (minSamplesOk ? 25 : (g_sampleCount * 25 / MAG_CAL_MIN_SAMPLES));
       
-      // Build status lines
-      char line1[32], line2[32], line3[32];
+      // Build status lines - compact format for 128x32 OLED
+      char line1[22], line2[22];
       snprintf(line1, sizeof(line1), "X:%s Y:%s %ds", 
-               xOk ? "OK" : "--", yOk ? "OK" : "--",
+               xOk ? "+" : "-", yOk ? "+" : "-",
                (int)((MAG_CAL_MAX_TIME_MS - elapsed) / 1000));
-      snprintf(line2, sizeof(line2), "R:%.0f/%.0f/%.0f", rangeX, rangeY, rangeZ);
-      snprintf(line3, sizeof(line3), "N:%d BTN=done", g_sampleCount);
+      snprintf(line2, sizeof(line2), "N:%d R:%.0f/%.0f", g_sampleCount, rangeX, rangeY);
       
-      showCalibrationScreen("MAG CAL", line1, line2, line3, progress);
+      showCalibrationScreen("MAG CAL", line1, line2, nullptr, progress);
       
       // Blink LED
       digitalWrite(LED_PIN, !digitalRead(LED_PIN));
@@ -1368,29 +1366,27 @@ void showCalibrationScreen(const char* title, const char* line1,
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   
-  // Title line
+  // Title line (row 0)
   display.setCursor(0, 0);
   display.print(title);
   
-  // Messages (compact layout for 32-pixel height)
+  // Line 1 (row 1)
   if (line1) {
     display.setCursor(0, 10);
     display.print(line1);
-    if (line2) {
-      // Show line2 next to line1 if space allows
-      display.print(F(" "));
-      display.print(line2);
-    }
-  } else if (line2) {
-    display.setCursor(0, 10);
-    display.print(line2);
   }
   
-  // Progress bar (if >= 0) or line3
+  // Progress bar (if >= 0) at row 2, or show line2/line3
   if (progress >= 0) {
-    int barY = 23;
-    int barH = 7;
-    int barW = SCREEN_WIDTH - 30;  // Leave 30px for percentage text (e.g. "100%")
+    // Show line2 after title if provided
+    if (line2) {
+      display.setCursor(60, 0);  // After title on same line
+      display.print(line2);
+    }
+    
+    int barY = 22;
+    int barH = 8;
+    int barW = SCREEN_WIDTH - 30;  // Leave 30px for percentage text
     
     display.drawRect(0, barY, barW, barH, SSD1306_WHITE);
     int fillW = (progress * (barW - 2)) / 100;
@@ -1402,25 +1398,30 @@ void showCalibrationScreen(const char* title, const char* line1,
     display.setCursor(barW + 3, barY);
     display.print(progress);
     display.print(F("%"));
-  } else if (line3) {
-    display.setCursor(0, 22);
-    display.print(line3);
+  } else {
+    // No progress bar - show line2 and line3
+    if (line2) {
+      display.setCursor(0, 11);
+      display.print(line2);
+    }
+    if (line3) {
+      display.setCursor(0, 22);
+      display.print(line3);
+    }
   }
   
   display.display();
 }
 
-void showMsg(const char* l1, const char* l2, const char* l3, const char* l4) {
+void showMsg(const char* l1, const char* l2, const char* l3) {
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   
   // Compact layout for 32-pixel height (3 lines max, 11 pixels spacing)
-  // Note: l4 parameter kept for API compatibility but ignored due to display height
   if (l1) { display.setCursor(0, 0);  display.println(l1); }
   if (l2) { display.setCursor(0, 11); display.println(l2); }
   if (l3) { display.setCursor(0, 22); display.println(l3); }
-  (void)l4;  // Suppress unused parameter warning
   
   display.display();
 }
