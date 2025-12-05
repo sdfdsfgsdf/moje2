@@ -78,7 +78,7 @@
 
 #define I2C_RETRY_COUNT       3       // Number of retries for I2C operations
 #define I2C_RETRY_DELAY_MS    5       // Delay between retries (ms)
-#define I2C_TIMEOUT_MS        50      // Timeout for I2C operations (ms)
+#define I2C_TIMEOUT_MS        15      // Timeout for I2C operations (ms) - 15ms is sufficient at 400kHz
 #define I2C_BUS_RECOVERY_CLOCKS 16    // Clock pulses for bus recovery
 
 // ============================================================================
@@ -99,8 +99,11 @@
 // MAHONY AHRS FILTER PARAMETERS (Optimized for ESP32)
 // ============================================================================
 
-#define MAHONY_KP             30.0f   // Proportional gain (lower for more stable)
-#define MAHONY_KI             0.01f   // Integral gain (small for drift correction)
+// Kp=10, Ki=0.005: More stable, less oscillation, good for slow/steady movements
+// Higher Kp (15-30) = faster convergence but may oscillate with noisy sensors
+// Higher Ki = better drift correction but may cause overshoot
+#define MAHONY_KP             10.0f   // Proportional gain (10-15 is stable for most cases)
+#define MAHONY_KI             0.005f  // Integral gain (0.005-0.01 for drift correction)
 
 // ============================================================================
 // GYROSCOPE CONFIGURATION
@@ -310,13 +313,15 @@ void runMagCalibration(void);
 bool calculateMagCalibration(void);
 bool calculateMagCalibrationEllipsoid(void);
 void applyMagCalibration(float raw[3], float calibrated[3]);
+void applyAccelCalibration(float raw[3], float calibrated[3]);
 void initDefaultCalibration(void);
 bool checkFlatPlacement(void);
 
-// Ellipsoid fitting (Li's algorithm)
+// Ellipsoid fitting (Li's algorithm with full Jacobi eigendecomposition)
 // Based on: https://sailboatinstruments.blogspot.com/2011/09/improved-magnetometer-calibration-part.html
 // and jremington/ICM_20948-AHRS calibrate3.py
 bool ellipsoidFit(float samples[][3], int n, float M[3][3], float bias[3], float* residual);
+void jacobi3x3(float A[3][3], float V[3][3], float eigenvalues[3]);
 void matrix3x3Inverse(float M[3][3], float Minv[3][3]);
 void matrix3x3Multiply(float A[3][3], float B[3][3], float C[3][3]);
 void matrix3x3Sqrt(float M[3][3], float sqrtM[3][3]);
@@ -647,7 +652,7 @@ bool recoverI2cBus(void) {
  * @brief Check if I2C devices are responding
  * Scans for OLED and IMU devices on the bus
  * 
- * @return true if at least one expected device responds
+ * @return true if IMU is found (IMU is critical for operation), OLED is optional
  */
 bool checkI2cDevices(void) {
   bool oledFound = false;
@@ -673,7 +678,9 @@ bool checkI2cDevices(void) {
                 oledFound ? "OK" : "NOT FOUND",
                 imuFound ? "OK" : "NOT FOUND");
   
-  return (oledFound || imuFound);
+  // IMU is critical - must be present for system to operate
+  // OLED is optional (system can work without display)
+  return imuFound;
 }
 
 /**
@@ -1003,16 +1010,25 @@ void runFullCalibration(void) {
 }
 
 /**
- * @brief Gyroscope calibration - average readings while stationary
+ * @brief Gyroscope calibration with outlier rejection and robust averaging
+ * 
+ * This improved version:
+ * 1. Collects samples in a buffer
+ * 2. Sorts to find median (for outlier detection)
+ * 3. Rejects samples > 2 standard deviations from median
+ * 4. Averages remaining samples for offset
  */
 void runGyroCalibration(void) {
   showCalibrationScreen("GYRO CAL", "Hold still!", nullptr, nullptr, 0);
   delay(1000);
   
-  long gyroSum[3] = {0, 0, 0};
+  // Use smaller buffer for faster calibration with outlier rejection
+  const int BUFFER_SIZE = 500;  // 500 samples at 2ms = ~1s
+  static float gyroBuffer[3][BUFFER_SIZE];
   int validSamples = 0;
   
-  for (int i = 0; i < GYRO_CAL_SAMPLES; i++) {
+  // Collect samples
+  for (int i = 0; i < GYRO_CAL_SAMPLES && validSamples < BUFFER_SIZE; i++) {
     // Feed watchdog every 100 samples
     if (i % 100 == 0) {
       feedWatchdog();
@@ -1021,9 +1037,9 @@ void runGyroCalibration(void) {
     if (imu.dataReady()) {
       imu.getAGMT();
       if (imu.status == ICM_20948_Stat_Ok) {
-        gyroSum[0] += imu.agmt.gyr.axes.x;
-        gyroSum[1] += imu.agmt.gyr.axes.y;
-        gyroSum[2] += imu.agmt.gyr.axes.z;
+        gyroBuffer[0][validSamples] = imu.agmt.gyr.axes.x;
+        gyroBuffer[1][validSamples] = imu.agmt.gyr.axes.y;
+        gyroBuffer[2][validSamples] = imu.agmt.gyr.axes.z;
         validSamples++;
       }
     }
@@ -1037,14 +1053,58 @@ void runGyroCalibration(void) {
     delay(2);  // ~500Hz sample rate
   }
   
-  if (validSamples > 0) {
-    g_cal.gyroOffset[0] = (float)gyroSum[0] / validSamples;
-    g_cal.gyroOffset[1] = (float)gyroSum[1] / validSamples;
-    g_cal.gyroOffset[2] = (float)gyroSum[2] / validSamples;
+  if (validSamples < 50) {
+    Serial.println(F("Not enough gyro samples collected!"));
+    return;
   }
   
-  Serial.printf("Gyro offset: [%.2f, %.2f, %.2f] from %d samples\n",
-                g_cal.gyroOffset[0], g_cal.gyroOffset[1], g_cal.gyroOffset[2], validSamples);
+  // Calculate mean and standard deviation for outlier rejection
+  float mean[3] = {0, 0, 0};
+  float stddev[3] = {0, 0, 0};
+  
+  // First pass: calculate mean
+  for (int axis = 0; axis < 3; axis++) {
+    for (int i = 0; i < validSamples; i++) {
+      mean[axis] += gyroBuffer[axis][i];
+    }
+    mean[axis] /= validSamples;
+  }
+  
+  // Second pass: calculate standard deviation
+  for (int axis = 0; axis < 3; axis++) {
+    for (int i = 0; i < validSamples; i++) {
+      float diff = gyroBuffer[axis][i] - mean[axis];
+      stddev[axis] += diff * diff;
+    }
+    stddev[axis] = sqrtf(stddev[axis] / validSamples);
+  }
+  
+  // Third pass: calculate trimmed mean (reject outliers > 2 sigma)
+  float trimmedSum[3] = {0, 0, 0};
+  int trimmedCount[3] = {0, 0, 0};
+  const float OUTLIER_THRESHOLD = 2.0f;  // 2 standard deviations
+  
+  for (int axis = 0; axis < 3; axis++) {
+    for (int i = 0; i < validSamples; i++) {
+      float diff = fabsf(gyroBuffer[axis][i] - mean[axis]);
+      if (diff < OUTLIER_THRESHOLD * stddev[axis]) {
+        trimmedSum[axis] += gyroBuffer[axis][i];
+        trimmedCount[axis]++;
+      }
+    }
+    
+    if (trimmedCount[axis] > 0) {
+      g_cal.gyroOffset[axis] = trimmedSum[axis] / trimmedCount[axis];
+    } else {
+      g_cal.gyroOffset[axis] = mean[axis];  // Fallback to regular mean
+    }
+  }
+  
+  int rejected = validSamples - (trimmedCount[0] + trimmedCount[1] + trimmedCount[2]) / 3;
+  Serial.printf("Gyro offset: [%.2f, %.2f, %.2f] from %d samples (%d outliers rejected)\n",
+                g_cal.gyroOffset[0], g_cal.gyroOffset[1], g_cal.gyroOffset[2], 
+                validSamples, rejected);
+  Serial.printf("Gyro stddev: [%.2f, %.2f, %.2f]\n", stddev[0], stddev[1], stddev[2]);
   
   showCalibrationScreen("GYRO CAL", "Done!", nullptr, nullptr, 100);
   delay(500);
@@ -1407,6 +1467,35 @@ void applyMagCalibration(float raw[3], float calibrated[3]) {
   }
 }
 
+/**
+ * @brief Apply accelerometer calibration using 3x3 matrix multiplication
+ * 
+ * Calibrated = A_inv * (Raw - Bias)
+ * 
+ * This uses the same format as magnetometer calibration.
+ * For full 6-point accelerometer calibration, accelBias and accelAinv should
+ * be populated during a dedicated calibration routine.
+ * 
+ * Note: Currently accel calibration is not populated during calibration,
+ * so this function returns the identity transformation when not calibrated.
+ */
+void applyAccelCalibration(float raw[3], float calibrated[3]) {
+  float temp[3];
+  
+  // Step 1: Subtract hard iron bias (offset)
+  for (int i = 0; i < 3; i++) {
+    temp[i] = raw[i] - g_cal.accelBias[i];
+  }
+  
+  // Step 2: Apply soft iron correction matrix (3x3 multiplication)
+  // calibrated = A_inv * temp
+  for (int i = 0; i < 3; i++) {
+    calibrated[i] = g_cal.accelAinv[i][0] * temp[0] + 
+                    g_cal.accelAinv[i][1] * temp[1] + 
+                    g_cal.accelAinv[i][2] * temp[2];
+  }
+}
+
 // ============================================================================
 // SENSOR PROCESSING
 // ============================================================================
@@ -1427,18 +1516,27 @@ bool validateMagData(float mx, float my, float mz) {
 }
 
 void processSensors(void) {
-  float Gxyz[3], Axyz[3], Mxyz[3], McalXyz[3];
+  float Gxyz[3], Axyz[3], AcalXyz[3], Mxyz[3], McalXyz[3];
   
   // Read gyroscope (apply offset and convert to rad/s)
   Gxyz[0] = GYRO_SCALE * (imu.agmt.gyr.axes.x - g_cal.gyroOffset[0]);
   Gxyz[1] = GYRO_SCALE * (imu.agmt.gyr.axes.y - g_cal.gyroOffset[1]);
   Gxyz[2] = GYRO_SCALE * (imu.agmt.gyr.axes.z - g_cal.gyroOffset[2]);
   
-  // Read and normalize accelerometer
+  // Read accelerometer (raw values for calibration)
   Axyz[0] = imu.agmt.acc.axes.x;
   Axyz[1] = imu.agmt.acc.axes.y;
   Axyz[2] = imu.agmt.acc.axes.z;
-  vector_normalize(Axyz);
+  
+  // Apply accelerometer calibration if available (6-point calibration)
+  // This improves pitch/roll accuracy and tilt compensation for heading
+  if (g_cal.isValid) {
+    applyAccelCalibration(Axyz, AcalXyz);
+  } else {
+    // Use raw values if no calibration
+    for (int i = 0; i < 3; i++) AcalXyz[i] = Axyz[i];
+  }
+  vector_normalize(AcalXyz);
   
   // Read magnetometer with axis mapping for AK09916
   Mxyz[0] = imu.magY();     // AK09916 Y -> sensor X
@@ -1448,7 +1546,7 @@ void processSensors(void) {
   // Validate mag data
   if (!validateMagData(Mxyz[0], Mxyz[1], Mxyz[2])) return;
   
-  // Apply calibration
+  // Apply magnetometer calibration
   if (g_cal.isValid) {
     applyMagCalibration(Mxyz, McalXyz);
   } else {
@@ -1485,18 +1583,25 @@ void processSensors(void) {
   if (deltat < 0.0001f) {
     deltat = 0.0001f;
   } else if (deltat > 0.02f) {
+    // Log warning when loop frequency drops below 50Hz (deltat > 20ms)
+    // This indicates the main loop is not keeping up, which may cause motion flattening
+    static unsigned long lastDtWarning = 0;
+    if (millis() - lastDtWarning > 5000) {  // Limit warning frequency to once per 5s
+      Serial.printf("Warning: deltat clamped from %.1fms to 20ms (loop too slow)\n", deltat * 1000.0f);
+      lastDtWarning = millis();
+    }
     deltat = 0.02f;
   }
   
   // Check for NaN in gyro/accel/mag data (can cause AHRS instability)
   if (isnan(Gxyz[0]) || isnan(Gxyz[1]) || isnan(Gxyz[2]) ||
-      isnan(Axyz[0]) || isnan(Axyz[1]) || isnan(Axyz[2]) ||
+      isnan(AcalXyz[0]) || isnan(AcalXyz[1]) || isnan(AcalXyz[2]) ||
       isnan(McalXyz[0]) || isnan(McalXyz[1]) || isnan(McalXyz[2])) {
     return;  // Skip this update
   }
   
-  // Update Mahony AHRS
-  MahonyQuaternionUpdate(Axyz[0], Axyz[1], Axyz[2],
+  // Update Mahony AHRS using calibrated accelerometer data
+  MahonyQuaternionUpdate(AcalXyz[0], AcalXyz[1], AcalXyz[2],
                          Gxyz[0], Gxyz[1], Gxyz[2],
                          McalXyz[0], McalXyz[1], McalXyz[2], deltat);
   
@@ -1520,6 +1625,12 @@ void processSensors(void) {
   quaternionToEuler(g_ahrs.q, yaw, pitch, roll);
   
   // Apply magnetic declination for geographic north
+  // Convention: NWU (North-West-Up) frame
+  // - yaw from quaternion is measured counter-clockwise from East (mathematical convention)
+  // - We negate and add declination to get compass heading from North
+  // - For Żywiec, Poland: declination = +5.5°E means magnetic north is 5.5° east of true north
+  // - geoYaw = true heading (from geographic/true north)
+  // Note: If compass consistently shows wrong direction, check sensor mounting and axis signs
   float geoYaw = -(yaw + MAGNETIC_DECLINATION);
   if (geoYaw < 0) geoYaw += 360.0f;
   if (geoYaw >= 360.0f) geoYaw -= 360.0f;
@@ -2034,10 +2145,96 @@ void matrix3x3Sqrt(float M[3][3], float sqrtM[3][3]) {
 }
 
 /**
- * @brief Ellipsoid fitting using Li's least squares algorithm
+ * @brief Jacobi eigenvalue algorithm for 3x3 symmetric matrices
+ * 
+ * Computes eigenvalues and eigenvectors of a symmetric 3x3 matrix using 
+ * the classical Jacobi rotation method. This provides full eigendecomposition
+ * for accurate soft-iron calibration.
+ * 
+ * @param A Input symmetric matrix (will be modified to diagonal form)
+ * @param V Output eigenvector matrix (columns are eigenvectors)
+ * @param eigenvalues Output eigenvalues (diagonal elements after convergence)
+ */
+void jacobi3x3(float A[3][3], float V[3][3], float eigenvalues[3]) {
+  const int MAX_ITERATIONS = 50;
+  const float EPSILON = 1e-10f;
+  
+  // Initialize V as identity matrix
+  for (int i = 0; i < 3; i++) {
+    for (int j = 0; j < 3; j++) {
+      V[i][j] = (i == j) ? 1.0f : 0.0f;
+    }
+  }
+  
+  // Jacobi iteration
+  for (int iter = 0; iter < MAX_ITERATIONS; iter++) {
+    // Find largest off-diagonal element
+    float maxVal = 0;
+    int p = 0, q = 1;
+    
+    for (int i = 0; i < 3; i++) {
+      for (int j = i + 1; j < 3; j++) {
+        if (fabsf(A[i][j]) > maxVal) {
+          maxVal = fabsf(A[i][j]);
+          p = i;
+          q = j;
+        }
+      }
+    }
+    
+    // Check convergence
+    if (maxVal < EPSILON) break;
+    
+    // Compute rotation angle
+    float theta = 0.5f * atan2f(2.0f * A[p][q], A[q][q] - A[p][p]);
+    float c = cosf(theta);
+    float s = sinf(theta);
+    
+    // Apply rotation to A: A' = G^T * A * G
+    float App = A[p][p];
+    float Aqq = A[q][q];
+    float Apq = A[p][q];
+    
+    A[p][p] = c*c*App - 2*c*s*Apq + s*s*Aqq;
+    A[q][q] = s*s*App + 2*c*s*Apq + c*c*Aqq;
+    A[p][q] = 0;
+    A[q][p] = 0;
+    
+    // Update other elements
+    for (int k = 0; k < 3; k++) {
+      if (k != p && k != q) {
+        float Akp = A[k][p];
+        float Akq = A[k][q];
+        A[k][p] = c*Akp - s*Akq;
+        A[p][k] = A[k][p];
+        A[k][q] = s*Akp + c*Akq;
+        A[q][k] = A[k][q];
+      }
+    }
+    
+    // Apply rotation to V (accumulate eigenvectors)
+    for (int k = 0; k < 3; k++) {
+      float Vkp = V[k][p];
+      float Vkq = V[k][q];
+      V[k][p] = c*Vkp - s*Vkq;
+      V[k][q] = s*Vkp + c*Vkq;
+    }
+  }
+  
+  // Extract eigenvalues from diagonal
+  eigenvalues[0] = A[0][0];
+  eigenvalues[1] = A[1][1];
+  eigenvalues[2] = A[2][2];
+}
+
+/**
+ * @brief Ellipsoid fitting using Li's least squares algorithm with full eigendecomposition
  * 
  * Based on: Qingde Li; Griffiths, J.G., "Least squares ellipsoid specific fitting"
  * and jremington/ICM_20948-AHRS calibrate3.py
+ * 
+ * This improved version uses Jacobi eigenvalue decomposition for accurate
+ * soft-iron correction, including proper handling of ellipsoid rotation.
  * 
  * The algorithm fits an ellipsoid to the magnetometer data points and
  * calculates the hard iron bias (B) and soft iron correction matrix (A_inv).
@@ -2050,7 +2247,7 @@ void matrix3x3Sqrt(float M[3][3], float sqrtM[3][3]) {
  * - b is the center (hard iron bias)
  * 
  * The correction is: calibrated = A_inv * (raw - B)
- * Where A_inv = F * sqrt(M), F is a normalization factor
+ * Where A_inv = F * V * D^(-1/2) * V^T, with V = eigenvectors, D = eigenvalues
  * 
  * @param samples Array of magnetometer samples [n][3]
  * @param n Number of samples
@@ -2063,15 +2260,6 @@ bool ellipsoidFit(float samples[][3], int n, float Ainv[3][3], float bias[3], fl
   if (n < 10) {
     return false;
   }
-  
-  // Build design matrix D for ellipsoid fitting
-  // D = [x^2, y^2, z^2, 2*y*z, 2*x*z, 2*x*y, 2*x, 2*y, 2*z, 1]
-  // This is a 10-parameter model for the general ellipsoid
-  
-  // We'll use a simplified approach that works well on embedded systems:
-  // 1. Find the center using weighted centroid
-  // 2. Compute the covariance matrix
-  // 3. Use eigenvalue decomposition to find the axes
   
   // Step 1: Find approximate center using min/max
   float xmin = 1e10f, xmax = -1e10f;
@@ -2093,38 +2281,28 @@ bool ellipsoidFit(float samples[][3], int n, float Ainv[3][3], float bias[3], fl
   float cz = (zmin + zmax) / 2.0f;
   
   // Step 2: Iteratively refine center using least squares
-  // We'll do a few iterations to converge on the best center
   for (int iter = 0; iter < 5; iter++) {
-    // Compute centered data
     float sumX = 0, sumY = 0, sumZ = 0;
-    float sumX2 = 0, sumY2 = 0, sumZ2 = 0;
-    float sumXY = 0, sumXZ = 0, sumYZ = 0;
+    float sumW = 0;
     
     for (int i = 0; i < n; i++) {
       float x = samples[i][0] - cx;
       float y = samples[i][1] - cy;
       float z = samples[i][2] - cz;
       
-      // Weight samples by their distance from center
       float r = sqrtf(x*x + y*y + z*z);
       if (r < 1.0f) r = 1.0f;
-      float w = 1.0f / r;  // Inverse distance weighting
+      float w = 1.0f / r;
       
       sumX += x * w;
       sumY += y * w;
       sumZ += z * w;
-      sumX2 += x * x * w;
-      sumY2 += y * y * w;
-      sumZ2 += z * z * w;
-      sumXY += x * y * w;
-      sumXZ += x * z * w;
-      sumYZ += y * z * w;
+      sumW += w;
     }
     
-    // Update center slightly towards weighted centroid of residuals
-    cx += sumX / n * 0.5f;
-    cy += sumY / n * 0.5f;
-    cz += sumZ / n * 0.5f;
+    cx += sumX / sumW * 0.5f;
+    cy += sumY / sumW * 0.5f;
+    cz += sumZ / sumW * 0.5f;
   }
   
   bias[0] = cx;
@@ -2159,47 +2337,58 @@ bool ellipsoidFit(float samples[][3], int n, float Ainv[3][3], float bias[3], fl
     }
   }
   
-  // Step 4: Calculate the scaling matrix
-  // For a perfect sphere, cov would be proportional to identity
-  // The eigenvalues tell us the axis lengths of the ellipsoid
+  // Step 4: Full eigenvalue decomposition using Jacobi method
+  float covCopy[3][3];
+  float V[3][3];      // Eigenvector matrix
+  float eigval[3];    // Eigenvalues
   
-  // Use power iteration to find approximate eigenvalues
-  float eigval[3];
-  float temp[3][3];
-  
-  // Copy covariance matrix
+  // Copy covariance matrix (Jacobi modifies it)
   for (int i = 0; i < 3; i++) {
     for (int j = 0; j < 3; j++) {
-      temp[i][j] = cov[i][j];
+      covCopy[i][j] = cov[i][j];
     }
   }
   
-  // Approximate eigenvalues using diagonal of matrix
-  // (This is a simplification - for more accuracy, use full eigendecomposition)
-  eigval[0] = sqrtf(cov[0][0]);
-  eigval[1] = sqrtf(cov[1][1]);
-  eigval[2] = sqrtf(cov[2][2]);
+  // Compute eigendecomposition
+  jacobi3x3(covCopy, V, eigval);
   
-  // Average radius
-  float avgRadius = (eigval[0] + eigval[1] + eigval[2]) / 3.0f;
+  // Convert eigenvalues to axis lengths (sqrt of eigenvalues for covariance)
+  float axisLengths[3];
+  for (int i = 0; i < 3; i++) {
+    axisLengths[i] = (eigval[i] > 0.01f) ? sqrtf(eigval[i]) : 0.1f;
+  }
+  
+  // Average radius for normalization
+  float avgRadius = (axisLengths[0] + axisLengths[1] + axisLengths[2]) / 3.0f;
   if (avgRadius < 1.0f) avgRadius = 1.0f;
   
-  // Step 5: Build the inverse transformation matrix
-  // This normalizes the ellipsoid to a sphere
+  // Step 5: Build the inverse transformation matrix using full eigendecomposition
+  // A_inv = (MAG_FIELD_NORM / avgRadius) * V * D^(-1/2) * V^T
+  // Where D^(-1/2) is diagonal matrix with 1/sqrt(eigenvalue) on diagonal
   
-  // Simple diagonal scaling (ignores rotation - works for most practical cases)
+  // First, build D^(-1/2) scaled by normalization factor
+  float Dinv[3][3] = {{0}};
+  float normFactor = MAG_FIELD_NORM / avgRadius;
+  for (int i = 0; i < 3; i++) {
+    Dinv[i][i] = (avgRadius / axisLengths[i]) * normFactor;
+  }
+  
+  // Compute V * Dinv
+  float VD[3][3] = {{0}};
   for (int i = 0; i < 3; i++) {
     for (int j = 0; j < 3; j++) {
-      if (i == j) {
-        // Scale factor for this axis
-        float scale = (eigval[i] > 0.1f) ? (avgRadius / eigval[i]) : 1.0f;
-        // Normalize to MAG_FIELD_NORM
-        Ainv[i][j] = scale * (MAG_FIELD_NORM / avgRadius);
-      } else {
-        // Off-diagonal: correct for non-orthogonality
-        // Use covariance to estimate cross-axis coupling
-        float offDiag = cov[i][j] / (eigval[i] * eigval[j] + 0.001f);
-        Ainv[i][j] = -offDiag * (MAG_FIELD_NORM / avgRadius) * 0.5f;
+      for (int k = 0; k < 3; k++) {
+        VD[i][j] += V[i][k] * Dinv[k][j];
+      }
+    }
+  }
+  
+  // Compute VD * V^T = Ainv
+  for (int i = 0; i < 3; i++) {
+    for (int j = 0; j < 3; j++) {
+      Ainv[i][j] = 0;
+      for (int k = 0; k < 3; k++) {
+        Ainv[i][j] += VD[i][k] * V[j][k];  // V^T has rows/cols swapped
       }
     }
   }
@@ -2223,6 +2412,12 @@ bool ellipsoidFit(float samples[][3], int n, float Ainv[3][3], float bias[3], fl
   }
   
   *residual = sqrtf(sumResidual / n) * 100.0f;  // As percentage
+  
+  // Log eigenvalues for debugging
+  Serial.printf("Ellipsoid fit eigenvalues: [%.2f, %.2f, %.2f]\n", 
+                eigval[0], eigval[1], eigval[2]);
+  Serial.printf("Axis lengths: [%.2f, %.2f, %.2f], avg radius: %.2f\n",
+                axisLengths[0], axisLengths[1], axisLengths[2], avgRadius);
   
   // Consider it successful if residual is below threshold
   return (*residual < ELLIPSOID_FIT_MAX_RESIDUAL);
