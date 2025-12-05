@@ -87,6 +87,7 @@
 #define I2C_RETRY_DELAY_MS    5       // Delay between retries (ms)
 #define I2C_TIMEOUT_MS        15      // Timeout for I2C operations (ms) - 15ms is sufficient at 400kHz
 #define I2C_BUS_RECOVERY_CLOCKS 16    // Clock pulses for bus recovery
+#define I2C_SPEED             400000  // I2C bus speed (400kHz)
 
 // ============================================================================
 // WATCHDOG CONFIGURATION
@@ -643,7 +644,7 @@ bool recoverI2cBus(void) {
   
   // Reinitialize I2C
   Wire.begin(I2C_SDA, I2C_SCL);
-  Wire.setClock(ICM_I2C_SPEED);
+  Wire.setClock(I2C_SPEED);
   // ESP32 Arduino Wire uses setTimeOut (capital O)
   Wire.setTimeOut(I2C_TIMEOUT_MS);
   
@@ -718,8 +719,8 @@ bool safeDisplayUpdate(void) {
 
 bool initIMU(void) {
   // Initialize IMU via SPI
-  // The SparkFun library uses begin() with SPI port and CS pin
-  imu.begin(SPI, IMU_CS_PIN);
+  // The SparkFun library uses begin(csPin, spiPort, spiSpeed)
+  imu.begin(IMU_CS_PIN, SPI, SPI_SPEED);
   
   if (imu.status == ICM_20948_Stat_Ok) {
     Serial.println(F("IMU found on SPI bus"));
