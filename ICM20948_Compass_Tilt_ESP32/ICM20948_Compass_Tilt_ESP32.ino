@@ -82,6 +82,14 @@
 #define I2C_BUS_RECOVERY_CLOCKS 16    // Clock pulses for bus recovery
 
 // ============================================================================
+// SENSOR HEALTH MONITORING
+// ============================================================================
+
+#define SENSOR_READ_TIMEOUT_MS    2000    // Timeout for detecting stalled sensor readings
+#define MAG_RESTART_INTERVAL_MS   10000   // Interval for periodic magnetometer restart
+#define DATA_READY_FAIL_THRESHOLD 1000    // Max consecutive dataReady failures before reinit
+
+// ============================================================================
 // WATCHDOG CONFIGURATION
 // ============================================================================
 
@@ -119,7 +127,7 @@
 // Magnetometer calibration  
 #define MAG_CAL_MIN_TIME_MS   10000   // Minimum calibration time (10s)
 #define MAG_CAL_MAX_TIME_MS   120000  // Maximum calibration time (2 min)
-#define MAG_CAL_MIN_RANGE     80.0f   // Minimum range for X/Y axes (μT)
+#define MAG_CAL_MIN_RANGE     80.0f   // Minimum range for X/Y/Z axes (μT)
 #define MAG_CAL_MIN_SAMPLES   300     // Minimum samples for good calibration
 #define MAG_UPDATE_INTERVAL   50      // ms between display updates
 #define MIN_SAMPLES_FOR_ELLIPSOID 100 // Minimum samples for ellipsoid fitting
@@ -288,6 +296,11 @@ bool          g_calibrationMode = false;
 volatile bool g_i2cError = false;        // Flag for I2C errors
 unsigned long g_lastI2cSuccess = 0;      // Last successful I2C operation timestamp
 uint32_t      g_i2cErrorCount = 0;       // Total I2C error count
+unsigned long g_lastSensorRead = 0;      // Last successful sensor read timestamp
+unsigned long g_lastMagRestart = 0;      // Last magnetometer restart timestamp
+uint32_t      g_sensorReadCount = 0;     // Successful sensor reads counter
+uint32_t      g_dataReadyFailCount = 0;  // Counter for dataReady() returning false
+bool          g_magInitialized = false;  // Flag indicating magnetometer initialization state
 
 // ============================================================================
 // FUNCTION PROTOTYPES
@@ -296,6 +309,7 @@ uint32_t      g_i2cErrorCount = 0;       // Total I2C error count
 // Initialization
 bool initIMU(void);
 void configureIMU(void);
+void restartMagnetometer(void);
 void initButton(void);
 
 // Calibration storage
@@ -478,6 +492,8 @@ void setup() {
   // Initialize AHRS timing
   g_ahrs.lastUpdate = micros();
   g_lastI2cSuccess = millis();
+  g_lastSensorRead = millis();
+  g_lastMagRestart = millis();
   
   showMsg("Ready!", "Hold BTN 2s", "for full cal");
   delay(1500);
@@ -503,6 +519,8 @@ void loop() {
     runFullCalibration();
     g_ahrs.lastUpdate = micros();  // Reset timing after calibration
     g_sensor.filtersReady = false;  // Reset filters
+    g_lastSensorRead = millis();    // Reset sensor read timestamp
+    g_lastMagRestart = millis();    // Reset mag restart timestamp
   }
   
   // Check for I2C bus health - recover if no successful communication for too long
@@ -513,6 +531,10 @@ void loop() {
       g_lastI2cSuccess = millis();
       g_i2cError = false;
       Serial.println(F("I2C bus recovered"));
+      // Reinitialize IMU after bus recovery
+      configureIMU();
+      g_lastSensorRead = millis();
+      g_lastMagRestart = millis();
     } else {
       Serial.println(F("I2C recovery failed - restarting..."));
       delay(100);
@@ -520,11 +542,36 @@ void loop() {
     }
   }
   
+  // Check if sensor readings have stalled (no new data for 2 seconds)
+  // This detects the ~15 second freeze issue
+  if (millis() - g_lastSensorRead > SENSOR_READ_TIMEOUT_MS) {
+    Serial.println(F("WARNING: Sensor readings stalled - restarting magnetometer"));
+    
+    // Restart the magnetometer - it may have gone to sleep or entered single-shot mode
+    restartMagnetometer();
+    delay(10);
+    
+    g_lastMagRestart = millis();
+    g_lastSensorRead = millis();  // Reset to avoid repeated restarts
+    g_dataReadyFailCount = 0;
+  }
+  
+  // Periodically restart magnetometer to prevent it from stopping
+  // AK09916 in ICM-20948 can sometimes stop providing data
+  if (millis() - g_lastMagRestart > MAG_RESTART_INTERVAL_MS) {
+    // Soft restart of magnetometer to keep it running
+    restartMagnetometer();
+    g_lastMagRestart = millis();
+  }
+  
   // Normal operation - read sensors and update display
   if (imu.dataReady()) {
+    g_dataReadyFailCount = 0;  // Reset fail counter on success
     imu.getAGMT();
     if (imu.status == ICM_20948_Stat_Ok) {
       g_lastI2cSuccess = millis();
+      g_lastSensorRead = millis();  // Track successful sensor read
+      g_sensorReadCount++;
       g_i2cError = false;
       processSensors();
     } else {
@@ -532,6 +579,18 @@ void loop() {
       if (g_i2cErrorCount % 100 == 0) {
         Serial.printf("I2C errors: %d\n", g_i2cErrorCount);
       }
+    }
+  } else {
+    // Track consecutive dataReady failures
+    g_dataReadyFailCount++;
+    
+    // If dataReady keeps failing, try to recover
+    // Note: Loop runs approximately every 1-10ms depending on sensor/display activity
+    if (g_dataReadyFailCount > DATA_READY_FAIL_THRESHOLD) {
+      Serial.println(F("WARNING: dataReady() consistently failing - reinitializing IMU"));
+      configureIMU();
+      g_dataReadyFailCount = 0;
+      g_lastMagRestart = millis();
     }
   }
   
@@ -731,7 +790,7 @@ void configureIMU(void) {
   imu.sleep(false);
   imu.lowPower(false);
   
-  // Set sample mode to continuous
+  // Set sample mode to continuous for accelerometer and gyroscope
   imu.setSampleMode((ICM_20948_Internal_Acc | ICM_20948_Internal_Gyr),
                     ICM_20948_Sample_Mode_Continuous);
   
@@ -751,18 +810,43 @@ void configureIMU(void) {
   imu.enableDLPF(ICM_20948_Internal_Acc, true);
   imu.enableDLPF(ICM_20948_Internal_Gyr, true);
   
-  // Start magnetometer
+  // Start magnetometer with continuous mode
+  // The AK09916 magnetometer in ICM-20948 needs to be properly initialized
+  // to work in continuous mode. startupMagnetometer() should set it up,
+  // but we need to ensure it's properly configured.
+  bool magInitialized = false;
   for (int attempt = 0; attempt < 5; attempt++) {
+    // startupMagnetometer() configures the I2C master and sets up the magnetometer
+    // It should put AK09916 in continuous mode 4 (100Hz) by default
     imu.startupMagnetometer();
     delay(100);
+    
+    // Verify magnetometer is responding
     if (imu.dataReady()) {
       imu.getAGMT();
       if (imu.magX() != 0 || imu.magY() != 0 || imu.magZ() != 0) {
-        Serial.println(F("Magnetometer initialized"));
+        Serial.println(F("Magnetometer initialized successfully"));
+        magInitialized = true;
         break;
       }
     }
+    Serial.printf("Magnetometer init attempt %d failed\n", attempt + 1);
   }
+  
+  // Update global flag
+  g_magInitialized = magInitialized;
+  
+  if (!magInitialized) {
+    Serial.println(F("WARNING: Magnetometer initialization may have failed!"));
+  }
+}
+
+/**
+ * @brief Restart magnetometer without full IMU reconfiguration
+ * Call this periodically to prevent magnetometer from stopping
+ */
+void restartMagnetometer(void) {
+  imu.startupMagnetometer();
 }
 
 void initButton(void) {
@@ -1128,27 +1212,29 @@ void runMagCalibration(void) {
       unsigned long elapsed = millis() - startTime;
       bool xOk = (rangeX >= MAG_CAL_MIN_RANGE);
       bool yOk = (rangeY >= MAG_CAL_MIN_RANGE);
+      bool zOk = (rangeZ >= MAG_CAL_MIN_RANGE);
       bool minTimeOk = (elapsed >= MAG_CAL_MIN_TIME_MS);
       bool minSamplesOk = (g_sampleCount >= MAG_CAL_MIN_SAMPLES);
       
-      // Auto-complete when all criteria met
-      if (xOk && yOk && minTimeOk && minSamplesOk) {
+      // Auto-complete when all criteria met (including Z-axis)
+      if (xOk && yOk && zOk && minTimeOk && minSamplesOk) {
         complete = true;
       }
       
-      // Calculate progress based on coverage
+      // Calculate progress based on coverage (5 factors at 20% each)
       int progress = 0;
-      progress += (xOk ? 25 : min(25, (int)(rangeX * 25 / MAG_CAL_MIN_RANGE)));
-      progress += (yOk ? 25 : min(25, (int)(rangeY * 25 / MAG_CAL_MIN_RANGE)));
-      progress += (minTimeOk ? 25 : (int)(elapsed * 25 / MAG_CAL_MIN_TIME_MS));
-      progress += (minSamplesOk ? 25 : (g_sampleCount * 25 / MAG_CAL_MIN_SAMPLES));
+      progress += (xOk ? 20 : min(20, (int)(rangeX * 20 / MAG_CAL_MIN_RANGE)));
+      progress += (yOk ? 20 : min(20, (int)(rangeY * 20 / MAG_CAL_MIN_RANGE)));
+      progress += (zOk ? 20 : min(20, (int)(rangeZ * 20 / MAG_CAL_MIN_RANGE)));
+      progress += (minTimeOk ? 20 : min(20, (int)(elapsed * 20 / MAG_CAL_MIN_TIME_MS)));
+      progress += (minSamplesOk ? 20 : min(20, (int)(g_sampleCount * 20 / MAG_CAL_MIN_SAMPLES)));
       
       // Build status lines - compact format for 128x32 OLED (max 21 chars)
       char line1[22], line2[22];
-      snprintf(line1, sizeof(line1), "%c%c %ds", 
-               xOk ? 'X' : 'x', yOk ? 'Y' : 'y',
+      snprintf(line1, sizeof(line1), "%c%c%c %ds", 
+               xOk ? 'X' : 'x', yOk ? 'Y' : 'y', zOk ? 'Z' : 'z',
                (int)((MAG_CAL_MAX_TIME_MS - elapsed) / 1000));
-      snprintf(line2, sizeof(line2), "n%d %.0f/%.0f", g_sampleCount, rangeX, rangeY);
+      snprintf(line2, sizeof(line2), "n%d %.0f/%.0f/%.0f", g_sampleCount, rangeX, rangeY, rangeZ);
       
       showCalibrationScreen("MAG CAL", line1, line2, nullptr, progress);
       
@@ -1167,10 +1253,20 @@ void runMagCalibration(void) {
     g_cal.magMax[i] = magMax[i];
   }
   
-  Serial.printf("Mag calibration complete: %d samples\n", g_sampleCount);
+  Serial.printf("Mag calibration %s: %d samples\n", complete ? "complete" : "TIMEOUT", g_sampleCount);
   Serial.printf("  X: [%.1f, %.1f] range=%.1f\n", magMin[0], magMax[0], magMax[0] - magMin[0]);
   Serial.printf("  Y: [%.1f, %.1f] range=%.1f\n", magMin[1], magMax[1], magMax[1] - magMin[1]);
   Serial.printf("  Z: [%.1f, %.1f] range=%.1f\n", magMin[2], magMax[2], magMax[2] - magMin[2]);
+  
+  // Prevent false positive calibration if loop timed out without completing
+  if (!complete) {
+    Serial.println(F("ERROR: Calibration timed out - insufficient rotation detected!"));
+    Serial.println(F("       Invalidating sample data to prevent bad calibration."));
+    g_sampleCount = 0;  // Invalidate samples so calculateMagCalibration will fail
+    showCalibrationScreen("MAG CAL", "TIMEOUT!", "Rotate more!", nullptr, -1);
+    delay(2000);
+    return;
+  }
   
   showCalibrationScreen("MAG CAL", "Processing...", nullptr, nullptr, 100);
   delay(500);
