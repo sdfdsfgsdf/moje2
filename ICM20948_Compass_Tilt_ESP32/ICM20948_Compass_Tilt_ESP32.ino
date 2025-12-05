@@ -82,6 +82,14 @@
 #define I2C_BUS_RECOVERY_CLOCKS 16    // Clock pulses for bus recovery
 
 // ============================================================================
+// SENSOR HEALTH MONITORING
+// ============================================================================
+
+#define SENSOR_READ_TIMEOUT_MS    2000    // Timeout for detecting stalled sensor readings
+#define MAG_RESTART_INTERVAL_MS   10000   // Interval for periodic magnetometer restart
+#define DATA_READY_FAIL_THRESHOLD 1000    // Max consecutive dataReady failures before reinit
+
+// ============================================================================
 // WATCHDOG CONFIGURATION
 // ============================================================================
 
@@ -292,6 +300,7 @@ unsigned long g_lastSensorRead = 0;      // Last successful sensor read timestam
 unsigned long g_lastMagRestart = 0;      // Last magnetometer restart timestamp
 uint32_t      g_sensorReadCount = 0;     // Successful sensor reads counter
 uint32_t      g_dataReadyFailCount = 0;  // Counter for dataReady() returning false
+bool          g_magInitialized = false;  // Flag indicating magnetometer initialization state
 
 // ============================================================================
 // FUNCTION PROTOTYPES
@@ -535,7 +544,7 @@ void loop() {
   
   // Check if sensor readings have stalled (no new data for 2 seconds)
   // This detects the ~15 second freeze issue
-  if (millis() - g_lastSensorRead > 2000) {
+  if (millis() - g_lastSensorRead > SENSOR_READ_TIMEOUT_MS) {
     Serial.println(F("WARNING: Sensor readings stalled - restarting magnetometer"));
     
     // Restart the magnetometer - it may have gone to sleep or entered single-shot mode
@@ -549,7 +558,7 @@ void loop() {
   
   // Periodically restart magnetometer to prevent it from stopping
   // AK09916 in ICM-20948 can sometimes stop providing data
-  if (millis() - g_lastMagRestart > 10000) {  // Every 10 seconds
+  if (millis() - g_lastMagRestart > MAG_RESTART_INTERVAL_MS) {
     // Soft restart of magnetometer to keep it running
     restartMagnetometer();
     g_lastMagRestart = millis();
@@ -576,7 +585,8 @@ void loop() {
     g_dataReadyFailCount++;
     
     // If dataReady keeps failing, try to recover
-    if (g_dataReadyFailCount > 1000) {  // ~1 second of failures at 1ms loop
+    // Note: Loop runs approximately every 1-10ms depending on sensor/display activity
+    if (g_dataReadyFailCount > DATA_READY_FAIL_THRESHOLD) {
       Serial.println(F("WARNING: dataReady() consistently failing - reinitializing IMU"));
       configureIMU();
       g_dataReadyFailCount = 0;
@@ -822,6 +832,9 @@ void configureIMU(void) {
     }
     Serial.printf("Magnetometer init attempt %d failed\n", attempt + 1);
   }
+  
+  // Update global flag
+  g_magInitialized = magInitialized;
   
   if (!magInitialized) {
     Serial.println(F("WARNING: Magnetometer initialization may have failed!"));
