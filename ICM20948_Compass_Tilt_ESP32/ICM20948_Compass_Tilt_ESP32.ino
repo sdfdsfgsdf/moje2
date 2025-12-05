@@ -128,12 +128,12 @@
 #define GYRO_CAL_SAMPLES      1000    // More samples for ESP32 (faster)
 
 // Magnetometer calibration  
-#define MAG_CAL_MIN_TIME_MS   10000   // Minimum calibration time (10s)
+#define MAG_CAL_MIN_TIME_MS   30000   // Minimum calibration time (10s)
 #define MAG_CAL_MAX_TIME_MS   120000  // Maximum calibration time (2 min)
 #define MAG_CAL_MIN_RANGE     80.0f   // Minimum range for X/Y axes (μT)
-#define MAG_CAL_MIN_SAMPLES   300     // Minimum samples for good calibration
-#define MAG_UPDATE_INTERVAL   50      // ms between display updates
-#define MIN_SAMPLES_FOR_ELLIPSOID 100 // Minimum samples for ellipsoid fitting
+#define MAG_CAL_MIN_SAMPLES   500     // Minimum samples for good calibration
+#define MAG_UPDATE_INTERVAL   100      // ms between display updates
+#define MIN_SAMPLES_FOR_ELLIPSOID 500 // Minimum samples for ellipsoid fitting
 
 // Accelerometer calibration
 #define ACCEL_CAL_POSITIONS   6       // 6 positions for full calibration
@@ -153,6 +153,7 @@
 
 #define MAG_VALID_MIN         5.0f    // Minimum valid mag reading
 #define MAG_VALID_MAX         4800.0f // Maximum valid mag reading (Earth's field ~25-65 μT)
+#define MAG_SCALE 0.15f
 
 // ============================================================================
 // NUMERICAL CONSTANTS FOR MATRIX OPERATIONS
@@ -160,7 +161,7 @@
 
 #define MATRIX_EPSILON        1e-10f  // Threshold for singularity detection
 #define CHOLESKY_MIN_DIAG     0.001f  // Minimum diagonal value for Cholesky decomposition
-#define ELLIPSOID_FIT_MAX_RESIDUAL 50.0f  // Maximum residual (%) for successful fit
+#define ELLIPSOID_FIT_MAX_RESIDUAL 15.0f  // Maximum residual (%) for successful fit
 #define EIGENVALUE_MIN_THRESHOLD 0.01f    // Minimum eigenvalue to avoid division by zero
 #define EIGENVALUE_FALLBACK   0.1f    // Fallback axis length when eigenvalue is too small
 
@@ -285,7 +286,7 @@ int g_sampleCount = 0;
 
 // Normalization factor for calibrated magnetometer readings
 // Set to match jremington/ICM_20948-AHRS format
-#define MAG_FIELD_NORM 1000.0f
+#define MAG_FIELD_NORM 1.0f
 
 // ============================================================================
 // GLOBAL VARIABLES
@@ -1167,9 +1168,9 @@ void runMagCalibration(void) {
       }
       
       // Apply axis mapping for AK09916 magnetometer
-      float mx = imu.magY();    // Swap and invert for proper orientation
-      float my = -imu.magX();
-      float mz = -imu.magZ();
+      float mx = imu.magY() * MAG_SCALE;
+      float my = -imu.magX() * MAG_SCALE;
+      float mz = -imu.magZ() * MAG_SCALE;
       
       // Validate reading
       if (validateMagData(mx, my, mz)) {
@@ -1230,7 +1231,7 @@ void runMagCalibration(void) {
       digitalWrite(LED_PIN, !digitalRead(LED_PIN));
     }
     
-    delay(10);
+    delay(100);
   }
   
   feedWatchdog();
@@ -1418,7 +1419,7 @@ bool calculateMagCalibrationEllipsoid(void) {
     
     // Calculate quality based on residual and sphericity
     // Lower residual = better fit = higher quality
-    float qualityFromResidual = max(0.0f, 100.0f - residual * 10.0f);
+    float qualityFromResidual = max(0.0f, 100.0f - residual * 5.0f);
     g_cal.quality = (uint8_t)min(100.0f, qualityFromResidual);
     
     return true;
